@@ -14,8 +14,16 @@
 
     <div id="hud">
       <div id="crosshair"></div>
-      <div id="info"></div>
-      <div id="hotbar"></div>
+      <div id="damage"></div>
+      <div id="info" class="hidden"></div>
+      <div id="bottom">
+        <div id="item-name"></div>
+        <div id="stats">
+          <div id="hearts" class="stat-row"></div>
+          <div id="hunger" class="stat-row"></div>
+        </div>
+        <div id="hotbar"></div>
+      </div>
       <div id="toast"></div>
     </div>
 
@@ -23,20 +31,49 @@
     <div id="touch" class="hidden">
       <div id="touch-surface"></div>
       <div id="joystick"><div id="joystick-knob"></div></div>
-      <button id="btn-menu" class="tbtn" aria-label="メニュー">☰</button>
+      <div id="touch-top">
+        <button id="btn-inv" class="tbtn" aria-label="持ち物">⋯</button>
+        <button id="btn-menu" class="tbtn" aria-label="メニュー">☰</button>
+      </div>
       <div id="touch-right">
         <div class="trow">
           <button id="btn-break" class="tbtn wide">壊す</button>
           <button id="btn-place" class="tbtn wide">置く</button>
         </div>
         <div class="trow">
-          <button id="btn-fly" class="tbtn">飛行</button>
           <button id="btn-sprint" class="tbtn">ダッシュ</button>
+          <button id="btn-sneak" class="tbtn">スニーク</button>
         </div>
         <div class="trow">
-          <button id="btn-down" class="tbtn round fly-only" aria-label="下降">▼</button>
           <button id="btn-jump" class="tbtn round big" aria-label="ジャンプ">▲</button>
         </div>
+      </div>
+    </div>
+
+    <!-- インベントリ / クラフト画面 -->
+    <div id="inv-screen" class="hidden">
+      <div id="inv-panel">
+        <div id="inv-left-col">
+          <h2 id="inv-title">クラフト</h2>
+          <div id="inv-left"></div>
+        </div>
+        <div id="inv-right-col">
+          <h2>持ち物</h2>
+          <div id="inv-main" class="igrid"></div>
+          <div id="inv-hotbar" class="igrid"></div>
+          <button id="inv-close" class="secondary">閉じる (E)</button>
+        </div>
+      </div>
+      <div id="inv-cursor" class="hidden"><canvas></canvas><span class="count"></span></div>
+      <div id="inv-tip" class="hidden"></div>
+    </div>
+
+    <!-- 死亡画面 -->
+    <div id="death" class="hidden">
+      <div class="panel">
+        <h1>死んでしまった！</h1>
+        <p id="death-cause">スコア: 0</p>
+        <button id="respawn">リスポーン</button>
       </div>
     </div>
 
@@ -46,21 +83,22 @@
         <p class="sub">ブラウザで動く Minecraft 風ボクセルワールド</p>
         <button id="start">クリックして開始</button>
         <div class="controls" id="controls-desktop">
-          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動　<kbd>マウス</kbd> 視点移動</div>
-          <div><kbd>Space</kbd> ジャンプ　<kbd>Shift</kbd> ダッシュ</div>
-          <div><kbd>左クリック</kbd> 壊す / 攻撃　<kbd>右クリック</kbd> ブロックを置く</div>
-          <div><kbd>1</kbd>〜<kbd>0</kbd> / <kbd>ホイール</kbd> 持ち物選択</div>
-          <div><kbd>F</kbd> 飛行モード切替（飛行中は <kbd>Space</kbd> 上昇 / <kbd>Shift</kbd> 下降）</div>
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動　<kbd>マウス</kbd> 視点　<kbd>Space</kbd> ジャンプ</div>
+          <div><kbd>Shift</kbd> スニーク　<kbd>Ctrl</kbd> / <kbd>W</kbd> 二度押し ダッシュ</div>
+          <div><kbd>左クリック</kbd> 長押しで壊す / 攻撃　<kbd>右クリック</kbd> 置く / 使う / 食べる</div>
+          <div><kbd>ホイールクリック</kbd> ブロック選択　<kbd>Q</kbd> 捨てる　<kbd>E</kbd> 持ち物・クラフト</div>
+          <div><kbd>1</kbd>〜<kbd>9</kbd> / <kbd>ホイール</kbd> ホットバー　<kbd>F5</kbd> 視点切替　<kbd>F3</kbd> デバッグ　<kbd>F1</kbd> HUD</div>
+          <div>クリエイティブ: <kbd>Space</kbd> 二度押しで飛行 (<kbd>Space</kbd> 上昇 / <kbd>Shift</kbd> 下降)</div>
           <div><kbd>Esc</kbd> メニューに戻る</div>
         </div>
         <div class="controls" id="controls-touch">
-          <div><b>画面左</b> をなぞって移動（外側までなぞるとダッシュ）</div>
-          <div><b>画面右</b> をなぞって視点移動</div>
-          <div><b>タップ</b> でブロックを置く　<b>長押し</b> で壊す</div>
-          <div><b>▲</b> ジャンプ　<b>飛行</b> で飛行モード（▼ で下降）</div>
-          <div>下のバーをタップして持ち物を選択</div>
+          <div><b>画面左</b> をなぞって移動（外側までなぞるとダッシュ）　<b>画面右</b> をなぞって視点</div>
+          <div><b>タップ</b> 置く / 使う / 攻撃　<b>長押し</b> 壊す</div>
+          <div><b>▲</b> ジャンプ（クリエイティブでは二度押しで飛行）　<b>スニーク</b> 切替（飛行中は下降）</div>
+          <div><b>⋯</b> 持ち物・クラフト　下のバーをタップして選択</div>
         </div>
         <div class="actions">
+          <button id="gamemode" class="secondary">ゲームモード: サバイバル</button>
           <button id="save" class="secondary">セーブ</button>
           <button id="newworld" class="secondary">新しい世界を生成</button>
           <button id="reset" class="secondary danger">セーブデータを削除</button>
