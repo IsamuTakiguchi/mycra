@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MyCra - ブラウザで遊べるボクセルワールド</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%235e3a1a'/%3E%3Crect width='16' height='5' fill='%2367a32b'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <div id="hud">
+      <div id="crosshair"></div>
+      <div id="info"></div>
+      <div id="hotbar"></div>
+      <div id="toast"></div>
+    </div>
+
+    <div id="overlay">
+      <div class="panel">
+        <h1>MyCra</h1>
+        <p class="sub">ブラウザで動く Minecraft 風ボクセルワールド</p>
+        <button id="start">クリックして開始</button>
+        <div class="controls">
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動</div>
+          <div><kbd>マウス</kbd> 視点移動</div>
+          <div><kbd>Space</kbd> ジャンプ　<kbd>Shift</kbd> ダッシュ</div>
+          <div><kbd>左クリック</kbd> ブロックを壊す</div>
+          <div><kbd>右クリック</kbd> ブロックを置く</div>
+          <div><kbd>1</kbd>〜<kbd>9</kbd> / <kbd>ホイール</kbd> ブロック選択</div>
+          <div><kbd>F</kbd> 飛行モード切替（飛行中は <kbd>Space</kbd> 上昇 / <kbd>Shift</kbd> 下降）</div>
+          <div><kbd>Esc</kbd> メニューに戻る</div>
+        </div>
+        <div class="actions">
+          <button id="save" class="secondary">セーブ</button>
+          <button id="newworld" class="secondary">新しい世界を生成</button>
+          <button id="reset" class="secondary danger">セーブデータを削除</button>
+        </div>
+        <p class="note">セーブデータはこのブラウザ内 (localStorage) に保存されます。10秒ごとに自動セーブされます。</p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
