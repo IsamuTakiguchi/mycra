@@ -37,9 +37,9 @@ npm run preview  # ビルド結果を確認
 `.github/workflows/deploy.yml` が以下を自動で行います。
 
 1. すべてのブランチ・Pull Request で `npm ci && npm run build` を実行してビルドを検証
-2. `main` ブランチへの push 時のみ、`dist/` を GitHub Pages へデプロイ
+2. `main` ブランチへの push 時のみ、`dist/` を `gh-pages` ブランチへ push して GitHub Pages で公開
 
-初回は `actions/configure-pages` が Pages を自動で有効化します。もし失敗する場合は、リポジトリの **Settings → Pages → Build and deployment → Source** を **GitHub Actions** に設定してください。
+`gh-pages` ブランチが作られると GitHub Pages が自動で有効になります。もし公開されない場合は、リポジトリの **Settings → Pages → Build and deployment → Source** を **Deploy from a branch**、Branch を **gh-pages** / **/(root)** に設定してください。
 
 ## 構成
 

@@ -1,5 +1,8 @@
 # main ブランチへ push されるたびに、ビルドして GitHub Pages へ自動デプロイする。
 # 他のブランチや Pull Request ではビルドの検証だけを行う。
+#
+# デプロイはビルド成果物 (dist/) を gh-pages ブランチへ push する方式。
+# GITHUB_TOKEN の contents: write 権限だけで動作し、Pages の事前設定が不要。
 name: Build & Deploy to GitHub Pages
 
 on:
@@ -9,9 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -39,27 +40,12 @@ jobs:
           # プロジェクトサイト (https://<owner>.github.io/<repo>/) 用のサブパス
           BASE_PATH: /${{ github.event.repository.name }}/
 
-      - name: Configure GitHub Pages
+      - name: Deploy to gh-pages branch
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          # Pages が未設定なら自動で有効化する (手動設定が不要になる)
-          enablement: true
-
-      - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-  deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          force_orphan: true
+          commit_message: 'Deploy ${{ github.sha }}'
