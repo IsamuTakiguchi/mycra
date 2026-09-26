@@ -92,6 +92,7 @@ let showDebug = false;
 let locked = false;
 let touchPlaying = false;
 let mining = { active: false, key: null, progress: 0, cooldown: 0 };
+let touchAim = null; // タッチ操作で対象にする画面上の位置 { x, y }
 let useHeld = false;
 let useRepeat = 0;
 let eatTimer = 0;
@@ -353,8 +354,14 @@ window.addEventListener('resize', () => {
 // タッチ操作
 const touch = new TouchControls($('touch'), null, {
   onLook: (dx, dy) => { if (playing()) player.look(dx, dy); },
-  onUse: () => { if (playing()) { if (!attack()) use(true); } },
-  onMineStart: () => { if (playing()) { attack(); startMining(); } },
+  onUse: (x, y) => {
+    if (!playing()) return;
+    touchAim = { x, y };
+    if (!attack()) use(true);
+    touchAim = null;
+  },
+  onMineStart: (x, y) => { if (playing()) { touchAim = { x, y }; attack(); startMining(); } },
+  onMineMove: (x, y) => { if (mining.active) touchAim = { x, y }; },
   onMineEnd: () => stopMining(),
   onJumpPress: () => {
     const now = performance.now();
@@ -437,20 +444,34 @@ function dropSelected(whole) {
 // ---------- ブロック / モブ操作 ----------
 const eye = new THREE.Vector3();
 const dir = new THREE.Vector3();
+const ndc = new THREE.Vector3();
 
 function reach() {
   return player.creative ? 5 : 4.5;
 }
 
+// 視線の方向。タッチ操作中は指の位置を通る方向 (Bedrock 版と同じ)
+function aimDirection() {
+  if (touchAim && !thirdPerson) {
+    camera.updateMatrixWorld();
+    ndc.set((touchAim.x / window.innerWidth) * 2 - 1, -(touchAim.y / window.innerHeight) * 2 + 1, 0.5);
+    ndc.unproject(camera);
+    dir.copy(ndc).sub(camera.position).normalize();
+  } else {
+    camera.getWorldDirection(dir);
+  }
+  return dir;
+}
+
 function blockTarget() {
   player.eyePosition(eye);
-  camera.getWorldDirection(dir);
+  aimDirection();
   return raycastVoxel(world, eye, dir, reach());
 }
 
 function mobTarget() {
   player.eyePosition(eye);
-  camera.getWorldDirection(dir);
+  aimDirection();
   const hit = mobs.raycast(eye, dir, ATTACK_REACH);
   if (!hit) return null;
   const block = raycastVoxel(world, eye, dir, hit.distance);
@@ -480,6 +501,7 @@ function stopMining() {
   mining.active = false;
   mining.progress = 0;
   mining.key = null;
+  touchAim = null;
 }
 
 // 破壊にかかる時間 (秒) と、ドロップするか
@@ -782,6 +804,12 @@ window.__mycra = {
   get touch() { return touch; },
   get screen() { return screen; },
   get timeOfDay() { return timeOfDay; },
+  get mining() { return mining; },
+  get playing() { return playing(); },
+  get locked() { return locked; },
+  get touchPlaying() { return touchPlaying; },
+  get touchAim() { return touchAim; },
+  set touchAim(v) { touchAim = v; },
   set timeOfDay(v) { timeOfDay = v; },
   blockTarget, mobTarget, attack, startMining, stopMining, use, placeBlock, pickBlock, save, selectSlot,
   startTouchPlay, showMenu, openInventory, closeInventory, breakBlockAt, eatNow,
