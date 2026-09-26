@@ -2,7 +2,9 @@ import * as THREE from 'three';
 import { World } from './world.js';
 import { Player } from './player.js';
 import { raycastVoxel } from './raycast.js';
-import { BLOCK, BLOCKS, HOTBAR_BLOCKS, drawTileTo } from './blocks.js';
+import { BLOCK, BLOCKS, HOTBAR, entryName, drawEntryTo } from './blocks.js';
+import { HandView } from './hand.js';
+import { TouchControls, isTouchDevice } from './touch.js';
 
 const SAVE_KEY = 'mycra:save:v1';
 const REACH = 6;
@@ -14,12 +16,20 @@ const overlay = document.getElementById('overlay');
 const infoEl = document.getElementById('info');
 const hotbarEl = document.getElementById('hotbar');
 const toastEl = document.getElementById('toast');
+const startBtn = document.getElementById('start');
+
+const touchDevice = isTouchDevice();
+if (touchDevice) {
+  document.body.classList.add('touch');
+  startBtn.textContent = 'タップして開始';
+}
 
 // ---------- レンダラー / シーン ----------
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, touchDevice ? 1.5 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.autoClear = false;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 400);
@@ -45,6 +55,10 @@ const highlight = new THREE.LineSegments(
 );
 highlight.visible = false;
 scene.add(highlight);
+
+// 一人称の腕と持ち物
+const hand = new HandView();
+hand.resize(window.innerWidth / window.innerHeight);
 
 // ---------- ワールド / プレイヤー ----------
 let world;
@@ -96,6 +110,7 @@ function createWorld(seed, saveData = null) {
   scene.add(world.group);
 
   player = new Player(world, camera);
+  if (touch) touch.player = player;
   if (saveData?.player) {
     const p = saveData.player;
     player.position.set(p.x, p.y, p.z);
@@ -107,9 +122,11 @@ function createWorld(seed, saveData = null) {
     player.spawn(sp.x, sp.z);
   }
   timeOfDay = saveData?.timeOfDay ?? 0.3;
-  selected = saveData?.selected ?? 0;
+  selected = Math.min(saveData?.selected ?? 2, HOTBAR.length - 1);
   player.syncCamera();
   renderHotbar();
+  hand.setEntry(HOTBAR[selected]);
+  touch?.setFlying(player.flying);
 }
 
 function newWorld() {
@@ -122,25 +139,31 @@ function newWorld() {
 // ---------- ホットバー ----------
 function renderHotbar() {
   hotbarEl.innerHTML = '';
-  HOTBAR_BLOCKS.forEach((id, i) => {
+  HOTBAR.forEach((entry, i) => {
     const slot = document.createElement('div');
     slot.className = 'slot' + (i === selected ? ' selected' : '');
     const c = document.createElement('canvas');
-    drawTileTo(c, BLOCKS[id].tiles[2]);
+    drawEntryTo(c, entry);
     const num = document.createElement('span');
     num.className = 'num';
-    num.textContent = String(i + 1);
+    num.textContent = String((i + 1) % 10);
     const name = document.createElement('span');
     name.className = 'name';
-    name.textContent = BLOCKS[id].name;
+    name.textContent = entryName(entry);
     slot.append(num, c, name);
+    slot.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (playing()) selectSlot(i);
+    });
     hotbarEl.appendChild(slot);
   });
 }
 
 function selectSlot(i) {
-  selected = (i + HOTBAR_BLOCKS.length) % HOTBAR_BLOCKS.length;
+  selected = (i + HOTBAR.length) % HOTBAR.length;
   [...hotbarEl.children].forEach((el, j) => el.classList.toggle('selected', j === selected));
+  hand.setEntry(HOTBAR[selected]);
 }
 
 let toastTimer = 0;
@@ -152,16 +175,51 @@ function toast(msg) {
 }
 
 // ---------- 入力 ----------
-let locked = false;
+let locked = false; // マウス: ポインターロック中
+let touchPlaying = false; // タッチ: プレイ中
 
-function requestLock() {
-  canvas.requestPointerLock?.();
+function playing() {
+  return locked || touchPlaying;
+}
+
+function showMenu() {
+  touchPlaying = false;
+  touch?.setEnabled(false);
+  overlay.classList.remove('hidden');
+  player.keys.clear();
+  save();
+}
+
+function startTouchPlay() {
+  touchPlaying = true;
+  overlay.classList.add('hidden');
+  touch?.setEnabled(true);
+  touch?.setFlying(player.flying);
+}
+
+async function start() {
+  if (touchDevice && !window.matchMedia('(pointer: fine)').matches) {
+    startTouchPlay();
+    return;
+  }
+  try {
+    const p = canvas.requestPointerLock?.();
+    if (p && typeof p.then === 'function') await p;
+    if (!canvas.requestPointerLock) throw new Error('unsupported');
+  } catch {
+    // ポインターロックが使えない環境 (タブレット等) はタッチ操作で開始
+    startTouchPlay();
+  }
 }
 
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === canvas;
-  overlay.classList.toggle('hidden', locked);
-  if (!locked) {
+  if (locked) {
+    touchPlaying = false;
+    touch?.setEnabled(false);
+    overlay.classList.add('hidden');
+  } else if (!touchPlaying) {
+    overlay.classList.remove('hidden');
     player.keys.clear();
     save();
   }
@@ -172,15 +230,15 @@ document.addEventListener('mousemove', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (!locked) return;
+  if (!playing()) return;
   player.keys.add(e.code);
   if (e.code.startsWith('Digit')) {
     const n = Number(e.code.slice(5));
-    if (n >= 1 && n <= HOTBAR_BLOCKS.length) selectSlot(n - 1);
+    const idx = n === 0 ? 9 : n - 1;
+    if (idx < HOTBAR.length) selectSlot(idx);
   }
-  if (e.code === 'KeyF') {
-    toast(player.toggleFly() ? '飛行モード ON' : '飛行モード OFF');
-  }
+  if (e.code === 'KeyF') toggleFly();
+  if (e.code === 'Escape' && touchPlaying) showMenu();
   if (e.code === 'Space' || e.code === 'Tab') e.preventDefault();
 });
 
@@ -189,7 +247,7 @@ document.addEventListener('keyup', (e) => {
 });
 
 document.addEventListener('wheel', (e) => {
-  if (!locked) return;
+  if (!playing()) return;
   selectSlot(selected + (e.deltaY > 0 ? 1 : -1));
 }, { passive: true });
 
@@ -200,7 +258,13 @@ canvas.addEventListener('mousedown', (e) => {
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-document.getElementById('start').addEventListener('click', requestLock);
+function toggleFly() {
+  const flying = player.toggleFly();
+  touch?.setFlying(flying);
+  toast(flying ? '飛行モード ON' : '飛行モード OFF');
+}
+
+startBtn.addEventListener('click', start);
 document.getElementById('save').addEventListener('click', () => save(true));
 document.getElementById('newworld').addEventListener('click', () => {
   if (confirm('現在の世界を破棄して新しい世界を生成しますか？')) newWorld();
@@ -217,7 +281,17 @@ window.addEventListener('beforeunload', () => save());
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
+  hand.resize(camera.aspect);
   renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// タッチ操作
+const touch = new TouchControls(document.getElementById('touch'), null, {
+  onLook: (dx, dy) => player.look(dx, dy),
+  onBreak: () => breakBlock(),
+  onPlace: () => placeBlock(),
+  onFly: () => toggleFly(),
+  onMenu: () => showMenu(),
 });
 
 // ---------- ブロック操作 ----------
@@ -231,6 +305,7 @@ function currentTarget() {
 }
 
 function breakBlock() {
+  hand.swing();
   const hit = currentTarget();
   if (!hit) return;
   if (BLOCKS[hit.id]?.unbreakable) {
@@ -241,6 +316,9 @@ function breakBlock() {
 }
 
 function placeBlock() {
+  const entry = HOTBAR[selected];
+  hand.swing();
+  if (!entry.block) return; // 道具を持っているときは置けない
   const hit = currentTarget();
   if (!hit) return;
   const x = hit.x + hit.normal[0];
@@ -248,8 +326,7 @@ function placeBlock() {
   const z = hit.z + hit.normal[2];
   if (!world.inBounds(x, y, z)) return;
   if (player.intersectsBlock(x, y, z)) return;
-  const id = HOTBAR_BLOCKS[selected];
-  world.set(x, y, z, id);
+  world.set(x, y, z, entry.block);
 }
 
 // ---------- 昼夜サイクル ----------
@@ -275,19 +352,13 @@ let fps = 0;
 
 function loop(now) {
   requestAnimationFrame(loop);
-
-// デバッグ / 自動テスト用フック
-window.__mycra = {
-  get world() { return world; },
-  get player() { return player; },
-  breakBlock, placeBlock, save, selectSlot, currentTarget,
-};
   const dt = Math.min((now - last) / 1000, 0.05);
   last = now;
 
-  if (locked) player.update(dt);
+  if (playing()) player.update(dt);
   world.update(3);
   updateSky(dt);
+  hand.update(dt, playing() && player.moving);
 
   const hit = currentTarget();
   highlight.visible = !!hit;
@@ -320,13 +391,15 @@ window.__mycra = {
       `XYZ ${p.x.toFixed(1)} / ${p.y.toFixed(1)} / ${p.z.toFixed(1)}\n` +
       `時刻 ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}\n` +
       `モード ${player.flying ? '飛行' : player.inWater ? '水泳' : '歩行'}\n` +
-      `手持ち ${BLOCKS[HOTBAR_BLOCKS[selected]].name}` +
+      `手持ち ${entryName(HOTBAR[selected])}` +
       (hit ? `\n注視 ${BLOCKS[hit.id].name}` : '');
   }
 
-  if (locked && performance.now() - lastSave > 10000) save();
+  if (playing() && performance.now() - lastSave > 10000) save();
 
+  renderer.clear();
   renderer.render(scene, camera);
+  hand.render(renderer);
 }
 
 // ---------- 起動 ----------
@@ -338,5 +411,7 @@ requestAnimationFrame(loop);
 window.__mycra = {
   get world() { return world; },
   get player() { return player; },
-  breakBlock, placeBlock, save, selectSlot, currentTarget,
+  get hand() { return hand; },
+  get touch() { return touch; },
+  breakBlock, placeBlock, save, selectSlot, currentTarget, startTouchPlay, showMenu,
 };

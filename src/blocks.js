@@ -53,12 +53,6 @@ export const BLOCKS = {
   [BLOCK.GRAVEL]:  { name: '砂利', tiles: [T.GRAVEL, T.GRAVEL, T.GRAVEL], opaque: true, solid: true, layer: 'opaque' },
 };
 
-// ホットバーに並ぶブロック (9 個)
-export const HOTBAR_BLOCKS = [
-  BLOCK.GRASS, BLOCK.DIRT, BLOCK.STONE, BLOCK.COBBLE, BLOCK.PLANKS,
-  BLOCK.LOG, BLOCK.LEAVES, BLOCK.GLASS, BLOCK.BRICK,
-];
-
 export function isOpaque(id) {
   return BLOCKS[id]?.opaque ?? false;
 }
@@ -234,4 +228,100 @@ export function drawTileTo(canvas, tile) {
   const tx = (tile % ATLAS_TILES) * TILE_PX;
   const ty = Math.floor(tile / ATLAS_TILES) * TILE_PX;
   ctx.drawImage(atlas, tx, ty, TILE_PX, TILE_PX, 0, 0, TILE_PX, TILE_PX);
+}
+
+// ---- 道具 (剣・ツルハシ) のドット絵 ----
+// 16x16 の文字列。'.' は透明、その他はパレットの色
+const TOOL_PALETTE = {
+  B: 0xffffff, b: 0xd8d8d8, s: 0x9a9a9a, g: 0x8a6a2a, h: 0x5a3a1a, w: 0x8d6236,
+};
+
+export const TOOLS = {
+  sword: {
+    name: '剣',
+    pixels: [
+      '...............B',
+      '..............BB',
+      '.............Bbs',
+      '............Bbs.',
+      '...........Bbs..',
+      '..........Bbs...',
+      '.........Bbs....',
+      '........Bbs.....',
+      '.......Bbs......',
+      '..g...Bbs.......',
+      '...g.Bbs........',
+      '....gbs.........',
+      '...hgg.g........',
+      '..h...g.........',
+      '.h..............',
+      'h...............',
+    ],
+  },
+  pickaxe: {
+    name: 'ツルハシ',
+    pixels: [
+      '.......bbbbbb...',
+      '.....bbsssssbb..',
+      '....bs......sbb.',
+      '...bs........sb.',
+      '...b..........sb',
+      '..b....ww......b',
+      '..b...ww.......b',
+      '.....ww.........',
+      '....ww..........',
+      '...ww...........',
+      '..ww............',
+      '.ww.............',
+      'ww..............',
+      '................',
+      '................',
+      '................',
+    ],
+  },
+};
+
+// ホットバーの並び。{ block } か { tool }
+export const HOTBAR = [
+  { tool: 'sword' },
+  { tool: 'pickaxe' },
+  { block: BLOCK.GRASS },
+  { block: BLOCK.DIRT },
+  { block: BLOCK.STONE },
+  { block: BLOCK.COBBLE },
+  { block: BLOCK.PLANKS },
+  { block: BLOCK.LOG },
+  { block: BLOCK.GLASS },
+  { block: BLOCK.BRICK },
+];
+
+export function entryName(entry) {
+  return entry.tool ? TOOLS[entry.tool].name : BLOCKS[entry.block].name;
+}
+
+export function toolPixelColor(ch) {
+  return ch === '.' ? null : TOOL_PALETTE[ch] ?? 0xff00ff;
+}
+
+// ホットバー用: 道具のドット絵を Canvas に描く
+export function drawToolTo(canvas, toolId) {
+  const { pixels } = TOOLS[toolId];
+  canvas.width = TILE_PX;
+  canvas.height = TILE_PX;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, TILE_PX, TILE_PX);
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      const color = toolPixelColor(pixels[y][x]);
+      if (color === null) continue;
+      ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+
+// ホットバー用: エントリに応じて描く
+export function drawEntryTo(canvas, entry) {
+  if (entry.tool) drawToolTo(canvas, entry.tool);
+  else drawTileTo(canvas, BLOCKS[entry.block].tiles[2]);
 }
