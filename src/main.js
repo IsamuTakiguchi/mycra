@@ -2,21 +2,31 @@ import * as THREE from 'three';
 import { World } from './world.js';
 import { Player } from './player.js';
 import { raycastVoxel } from './raycast.js';
-import { BLOCK, BLOCKS, HOTBAR, entryName, drawEntryTo } from './blocks.js';
+import { BLOCK, BLOCKS, isSolid, createCrackTexture } from './blocks.js';
+import { ITEMS, itemName } from './items.js';
+import { Inventory, HOTBAR_SIZE } from './inventory.js';
+import { InventoryScreen } from './ui.js';
+import { HUD } from './hud.js';
 import { HandView } from './hand.js';
+import { DropManager } from './drops.js';
+import { MobManager } from './mobs.js';
+import { buildMobModel } from './models.js';
 import { TouchControls, isTouchDevice } from './touch.js';
+import { intersectsBlock } from './physics.js';
+import { mulberry32 } from './noise.js';
+import { DAY_LENGTH } from './constants.js';
 
-const SAVE_KEY = 'mycra:save:v1';
-const REACH = 6;
-const DAY_LENGTH = 600; // 秒 (1 日 = 10 分)
+const SAVE_KEY = 'mycra:save:v2';
+const LEGACY_SAVE_KEY = 'mycra:save:v1';
+const DEFAULT_SEED = 20240601;
+const ATTACK_REACH = 3;
 
 // ---------- DOM ----------
-const canvas = document.getElementById('game');
-const overlay = document.getElementById('overlay');
-const infoEl = document.getElementById('info');
-const hotbarEl = document.getElementById('hotbar');
-const toastEl = document.getElementById('toast');
-const startBtn = document.getElementById('start');
+const $ = (id) => document.getElementById(id);
+const canvas = $('game');
+const overlay = $('overlay');
+const startBtn = $('start');
+const deathEl = $('death');
 
 const touchDevice = isTouchDevice();
 if (touchDevice) {
@@ -33,6 +43,7 @@ renderer.autoClear = false;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 400);
+const BASE_FOV = 75;
 
 const skyDay = new THREE.Color(0x87ceeb);
 const skyDusk = new THREE.Color(0xf0905a);
@@ -48,28 +59,61 @@ scene.add(sun);
 const ambient = new THREE.AmbientLight(0xffffff, 0.35);
 scene.add(ambient);
 
-// ブロック選択枠
+// ブロック選択枠とヒビ
 const highlight = new THREE.LineSegments(
   new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002, 1.002, 1.002)),
   new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.75 }),
 );
 highlight.visible = false;
 scene.add(highlight);
+const crack = createCrackTexture();
+const crackMesh = new THREE.Mesh(
+  new THREE.BoxGeometry(1.004, 1.004, 1.004),
+  new THREE.MeshBasicMaterial({ map: crack.texture, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 }),
+);
+crackMesh.visible = false;
+scene.add(crackMesh);
 
-// 一人称の腕と持ち物
 const hand = new HandView();
 hand.resize(window.innerWidth / window.innerHeight);
 
-// ---------- ワールド / プレイヤー ----------
-let world;
-let player;
-let selected = 0;
-let timeOfDay = 0.3; // 0..1 (0.25 = 朝, 0.5 = 昼, 0.75 = 夕方)
-let lastSave = 0;
+// 三人称視点用のプレイヤーモデル
+const playerModel = buildMobModel('player');
+playerModel.group.visible = false;
+scene.add(playerModel.group);
 
+// ---------- 状態 ----------
+let world, player, inventory, drops, mobs, screen;
+let timeOfDay = 0.3;
+let daylight = 1;
+let lastSave = 0;
+let thirdPerson = false;
+let showDebug = false;
+let locked = false;
+let touchPlaying = false;
+let mining = { active: false, key: null, progress: 0, cooldown: 0 };
+let useHeld = false;
+let useRepeat = 0;
+let eatTimer = 0;
+let lastSpaceTap = 0;
+let lastForwardTap = 0;
+let modelAnim = 0;
+let fps = 0, frames = 0, fpsTime = 0;
+let spawnRand = mulberry32(1);
+
+const hud = new HUD({
+  hearts: $('hearts'), hunger: $('hunger'), hotbar: $('hotbar'), info: $('info'),
+  itemName: $('item-name'), stats: $('stats'), damage: $('damage'), toast: $('toast'),
+});
+
+function playing() {
+  return (locked || touchPlaying) && !screen.open && !player.dead;
+}
+
+// ---------- セーブ / ロード ----------
 function loadSave() {
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
+    const raw = localStorage.getItem(SAVE_KEY) ?? localStorage.getItem(LEGACY_SAVE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -79,29 +123,35 @@ function loadSave() {
 function save(showToast = false) {
   if (!world) return;
   const data = {
+    version: 2,
     seed: world.seed,
     edits: world.serializeEdits(),
     player: {
       x: player.position.x, y: player.position.y, z: player.position.z,
-      yaw: player.yaw, pitch: player.pitch, flying: player.flying,
+      yaw: player.yaw, pitch: player.pitch, flying: player.flying, gameMode: player.gameMode,
+      health: player.health, hunger: player.hunger, spawnPoint: player.spawnPoint,
     },
+    inventory: inventory.serialize(),
     timeOfDay,
-    selected,
+    mobs: mobs.serialize(),
+    drops: drops.serialize(),
     savedAt: Date.now(),
   };
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-    if (showToast) toast('セーブしました');
+    if (showToast) hud.toast('セーブしました');
   } catch {
-    if (showToast) toast('セーブに失敗しました');
+    if (showToast) hud.toast('セーブに失敗しました');
   }
   lastSave = performance.now();
 }
 
-function createWorld(seed, saveData = null) {
+function createWorld(seed, saveData = null, gameMode = 'survival') {
   if (world) {
     scene.remove(world.group);
     for (const c of world.chunks.values()) for (const m of c.meshes) m.geometry.dispose();
+    drops.clear();
+    mobs.clear();
   }
   world = new World(seed);
   world.generate();
@@ -110,91 +160,66 @@ function createWorld(seed, saveData = null) {
   scene.add(world.group);
 
   player = new Player(world, camera);
+  player.gameMode = saveData?.player?.gameMode ?? gameMode;
+  inventory = new Inventory();
+  drops = new DropManager(world, scene);
+  mobs = new MobManager(world, scene);
+  mobs.onPlayerHurt = () => hud.flashDamage();
+  spawnRand = mulberry32(seed + 77);
   if (touch) touch.player = player;
+  screen.inv = inventory;
+
   if (saveData?.player) {
     const p = saveData.player;
     player.position.set(p.x, p.y, p.z);
     player.yaw = p.yaw;
     player.pitch = p.pitch;
-    player.flying = !!p.flying;
+    player.flying = !!p.flying && player.creative;
+    if (p.health !== undefined) player.health = p.health;
+    if (p.hunger !== undefined) player.hunger = p.hunger;
+    player.spawnPoint = p.spawnPoint ?? world.findSpawn();
   } else {
     const sp = world.findSpawn();
     player.spawn(sp.x, sp.z);
   }
+  if (saveData?.inventory) inventory.load(saveData.inventory);
+  if (saveData?.mobs) mobs.load(saveData.mobs);
+  else mobs.populate(spawnRand);
+  if (saveData?.drops) drops.load(saveData.drops);
   timeOfDay = saveData?.timeOfDay ?? 0.3;
-  selected = Math.min(saveData?.selected ?? 2, HOTBAR.length - 1);
   player.syncCamera();
-  renderHotbar();
-  hand.setEntry(HOTBAR[selected]);
-  touch?.setFlying(player.flying);
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+  updateModeButton();
 }
 
 function newWorld() {
   const seed = Math.floor(Math.random() * 2 ** 31);
-  createWorld(seed);
+  createWorld(seed, null, player.gameMode);
   save();
-  toast(`新しい世界を生成しました (seed: ${seed})`);
+  hud.toast(`新しい世界を生成しました (seed: ${seed})`);
 }
 
-// ---------- ホットバー ----------
-function renderHotbar() {
-  hotbarEl.innerHTML = '';
-  HOTBAR.forEach((entry, i) => {
-    const slot = document.createElement('div');
-    slot.className = 'slot' + (i === selected ? ' selected' : '');
-    const c = document.createElement('canvas');
-    drawEntryTo(c, entry);
-    const num = document.createElement('span');
-    num.className = 'num';
-    num.textContent = String((i + 1) % 10);
-    const name = document.createElement('span');
-    name.className = 'name';
-    name.textContent = entryName(entry);
-    slot.append(num, c, name);
-    slot.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (playing()) selectSlot(i);
-    });
-    hotbarEl.appendChild(slot);
-  });
-}
-
-function selectSlot(i) {
-  selected = (i + HOTBAR.length) % HOTBAR.length;
-  [...hotbarEl.children].forEach((el, j) => el.classList.toggle('selected', j === selected));
-  hand.setEntry(HOTBAR[selected]);
-}
-
-let toastTimer = 0;
-function toast(msg) {
-  toastEl.textContent = msg;
-  toastEl.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2000);
+function updateModeButton() {
+  $('gamemode').textContent = `ゲームモード: ${player.creative ? 'クリエイティブ' : 'サバイバル'}`;
 }
 
 // ---------- 入力 ----------
-let locked = false; // マウス: ポインターロック中
-let touchPlaying = false; // タッチ: プレイ中
-
-function playing() {
-  return locked || touchPlaying;
-}
-
 function showMenu() {
   touchPlaying = false;
-  touch?.setEnabled(false);
+  touch.setEnabled(false);
   overlay.classList.remove('hidden');
   player.keys.clear();
+  stopMining();
+  useHeld = false;
   save();
 }
 
 function startTouchPlay() {
   touchPlaying = true;
   overlay.classList.add('hidden');
-  touch?.setEnabled(true);
-  touch?.setFlying(player.flying);
+  touch.setEnabled(true);
+  touch.setFlying(player.flying);
 }
 
 async function start() {
@@ -207,7 +232,6 @@ async function start() {
     if (p && typeof p.then === 'function') await p;
     if (!canvas.requestPointerLock) throw new Error('unsupported');
   } catch {
-    // ポインターロックが使えない環境 (タブレット等) はタッチ操作で開始
     startTouchPlay();
   }
 }
@@ -216,30 +240,53 @@ document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === canvas;
   if (locked) {
     touchPlaying = false;
-    touch?.setEnabled(false);
+    touch.setEnabled(false);
     overlay.classList.add('hidden');
-  } else if (!touchPlaying) {
+  } else if (!touchPlaying && !screen.open && !player.dead) {
     overlay.classList.remove('hidden');
     player.keys.clear();
+    stopMining();
+    useHeld = false;
     save();
   }
 });
 
 document.addEventListener('mousemove', (e) => {
-  if (locked) player.look(e.movementX, e.movementY);
+  if (locked && !screen.open) player.look(e.movementX, e.movementY);
 });
 
 document.addEventListener('keydown', (e) => {
-  if (!playing()) return;
+  if (screen.open) {
+    if (e.code === 'KeyE' || e.code === 'Escape') { e.preventDefault(); closeInventory(); }
+    return;
+  }
+  if (!(locked || touchPlaying) || player.dead) return;
+  if (e.repeat) return;
   player.keys.add(e.code);
+  const now = performance.now();
   if (e.code.startsWith('Digit')) {
     const n = Number(e.code.slice(5));
-    const idx = n === 0 ? 9 : n - 1;
-    if (idx < HOTBAR.length) selectSlot(idx);
+    if (n >= 1 && n <= HOTBAR_SIZE) selectSlot(n - 1);
   }
-  if (e.code === 'KeyF') toggleFly();
-  if (e.code === 'Escape' && touchPlaying) showMenu();
-  if (e.code === 'Space' || e.code === 'Tab') e.preventDefault();
+  switch (e.code) {
+    case 'KeyE': openInventory(); break;
+    case 'KeyQ': dropSelected(e.ctrlKey); break;
+    case 'F5': e.preventDefault(); thirdPerson = !thirdPerson; break;
+    case 'F3': e.preventDefault(); showDebug = !showDebug; $('info').classList.toggle('hidden', !showDebug); break;
+    case 'F1': e.preventDefault(); $('hud').classList.toggle('hidden'); break;
+    case 'Space':
+      e.preventDefault();
+      if (now - lastSpaceTap < 300) { toggleFly(); lastSpaceTap = 0; } else lastSpaceTap = now;
+      break;
+    case 'KeyW':
+      if (now - lastForwardTap < 300 && (player.creative || player.hunger > 6)) player.sprinting = true;
+      lastForwardTap = now;
+      break;
+    case 'Escape':
+      if (touchPlaying) showMenu();
+      break;
+    case 'Tab': e.preventDefault(); break;
+  }
 });
 
 document.addEventListener('keyup', (e) => {
@@ -248,33 +295,51 @@ document.addEventListener('keyup', (e) => {
 
 document.addEventListener('wheel', (e) => {
   if (!playing()) return;
-  selectSlot(selected + (e.deltaY > 0 ? 1 : -1));
+  selectSlot(inventory.selected + (e.deltaY > 0 ? 1 : -1));
 }, { passive: true });
 
 canvas.addEventListener('mousedown', (e) => {
-  if (!locked) return;
-  if (e.button === 0) breakBlock();
-  else if (e.button === 2) placeBlock();
+  if (!locked || !playing()) return;
+  if (e.button === 0) { attack(); startMining(); }
+  else if (e.button === 1) { e.preventDefault(); pickBlock(); }
+  else if (e.button === 2) { useHeld = true; useRepeat = 0; use(); }
+});
+document.addEventListener('mouseup', (e) => {
+  if (e.button === 0) stopMining();
+  if (e.button === 2) { useHeld = false; eatTimer = 0; }
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function toggleFly() {
-  const flying = player.toggleFly();
-  touch?.setFlying(flying);
-  toast(flying ? '飛行モード ON' : '飛行モード OFF');
+  if (!player.creative) return;
+  const on = player.setFlying(!player.flying);
+  touch.setFlying(on);
 }
 
 startBtn.addEventListener('click', start);
-document.getElementById('save').addEventListener('click', () => save(true));
-document.getElementById('newworld').addEventListener('click', () => {
+$('save').addEventListener('click', () => save(true));
+$('gamemode').addEventListener('click', () => {
+  player.gameMode = player.creative ? 'survival' : 'creative';
+  if (!player.creative) player.setFlying(false);
+  updateModeButton();
+  hud.toast(player.creative ? 'クリエイティブモード' : 'サバイバルモード');
+});
+$('newworld').addEventListener('click', () => {
   if (confirm('現在の世界を破棄して新しい世界を生成しますか？')) newWorld();
 });
-document.getElementById('reset').addEventListener('click', () => {
+$('reset').addEventListener('click', () => {
   if (confirm('セーブデータを削除して最初からやり直しますか？')) {
     localStorage.removeItem(SAVE_KEY);
-    createWorld(20240601);
-    toast('セーブデータを削除しました');
+    localStorage.removeItem(LEGACY_SAVE_KEY);
+    createWorld(DEFAULT_SEED, null, 'survival');
+    hud.toast('セーブデータを削除しました');
   }
+});
+$('respawn').addEventListener('click', () => {
+  player.respawn();
+  deathEl.classList.add('hidden');
+  if (!locked && !touchDevice) start();
+  else if (touchDevice) startTouchPlay();
 });
 
 window.addEventListener('beforeunload', () => save());
@@ -286,132 +351,439 @@ window.addEventListener('resize', () => {
 });
 
 // タッチ操作
-const touch = new TouchControls(document.getElementById('touch'), null, {
-  onLook: (dx, dy) => player.look(dx, dy),
-  onBreak: () => breakBlock(),
-  onPlace: () => placeBlock(),
-  onFly: () => toggleFly(),
+const touch = new TouchControls($('touch'), null, {
+  onLook: (dx, dy) => { if (playing()) player.look(dx, dy); },
+  onUse: () => { if (playing()) { if (!attack()) use(true); } },
+  onMineStart: () => { if (playing()) { attack(); startMining(); } },
+  onMineEnd: () => stopMining(),
+  onJumpPress: () => {
+    const now = performance.now();
+    if (now - lastSpaceTap < 300) { toggleFly(); lastSpaceTap = 0; } else lastSpaceTap = now;
+  },
+  onInventory: () => { if (screen.open) closeInventory(); else if (touchPlaying && !player.dead) openInventory(); },
   onMenu: () => showMenu(),
 });
 
-// ---------- ブロック操作 ----------
+// ホットバーのタップ
+$('hotbar').addEventListener('pointerdown', (e) => {
+  const slots = [...$('hotbar').children];
+  const i = slots.findIndex((s) => s === e.target || s.contains(e.target));
+  if (i >= 0 && (locked || touchPlaying)) { e.preventDefault(); selectSlot(i); }
+});
+
+// ---------- インベントリ ----------
+screen = new InventoryScreen($('inv-screen'), null, {
+  onClose: () => closeInventory(),
+  getStations: () => nearbyStations(),
+  onDropStack: (stack) => dropStack(stack),
+});
+
+function openInventory() {
+  screen.show(player.creative ? 'creative' : 'survival');
+  player.keys.clear();
+  stopMining();
+  useHeld = false;
+  if (locked) document.exitPointerLock();
+}
+
+function closeInventory() {
+  screen.hide();
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+  if (!touchPlaying && !locked) start();
+}
+
+function nearbyStations() {
+  const set = new Set();
+  const p = player.position;
+  const r = 4;
+  for (let x = Math.floor(p.x - r); x <= Math.floor(p.x + r); x++) {
+    for (let y = Math.floor(p.y - r); y <= Math.floor(p.y + r); y++) {
+      for (let z = Math.floor(p.z - r); z <= Math.floor(p.z + r); z++) {
+        const id = world.get(x, y, z);
+        if (id === BLOCK.CRAFTING_TABLE) set.add('crafting_table');
+        else if (id === BLOCK.FURNACE) set.add('furnace');
+      }
+    }
+  }
+  return set;
+}
+
+function selectSlot(i) {
+  inventory.selected = (i + HOTBAR_SIZE) % HOTBAR_SIZE;
+  hud.renderHotbar(inventory);
+  hud.showItemName(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+  eatTimer = 0;
+}
+
+function dropStack(stack) {
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const eye = player.eyePosition();
+  drops.spawn(stack.id, stack.count, eye.x + dir.x * 0.5, eye.y - 0.3, eye.z + dir.z * 0.5, new THREE.Vector3(dir.x * 5, 2 + dir.y * 4, dir.z * 5));
+}
+
+function dropSelected(whole) {
+  const s = inventory.selectedItem;
+  if (!s) return;
+  const n = whole ? s.count : 1;
+  dropStack({ id: s.id, count: n });
+  inventory.consumeSelected(n);
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+}
+
+// ---------- ブロック / モブ操作 ----------
 const eye = new THREE.Vector3();
 const dir = new THREE.Vector3();
 
-function currentTarget() {
+function reach() {
+  return player.creative ? 5 : 4.5;
+}
+
+function blockTarget() {
   player.eyePosition(eye);
   camera.getWorldDirection(dir);
-  return raycastVoxel(world, eye, dir, REACH);
+  return raycastVoxel(world, eye, dir, reach());
 }
 
-function breakBlock() {
+function mobTarget() {
+  player.eyePosition(eye);
+  camera.getWorldDirection(dir);
+  const hit = mobs.raycast(eye, dir, ATTACK_REACH);
+  if (!hit) return null;
+  const block = raycastVoxel(world, eye, dir, hit.distance);
+  if (block && block.distance < hit.distance) return null;
+  return hit.mob;
+}
+
+// 左クリック: モブがいれば攻撃 (true を返す)
+function attack() {
+  if (player.attackCooldown > 0) return false;
+  const mob = mobTarget();
+  if (!mob) return false;
   hand.swing();
-  const hit = currentTarget();
-  if (!hit) return;
-  if (BLOCKS[hit.id]?.unbreakable) {
-    toast('岩盤は壊せません');
+  const item = inventory.selectedItem;
+  const dmg = item && ITEMS[item.id].damage ? ITEMS[item.id].damage : 1;
+  mob.damage(dmg, player.position);
+  player.attackCooldown = 0.6;
+  player.exhaustion += 0.1;
+  return true;
+}
+
+function startMining() {
+  mining.active = true;
+}
+
+function stopMining() {
+  mining.active = false;
+  mining.progress = 0;
+  mining.key = null;
+}
+
+// 破壊にかかる時間 (秒) と、ドロップするか
+function breakInfo(def, item) {
+  if (def.unbreakable) return null;
+  if (def.hardness <= 0) return { time: 0.05, drops: true };
+  const tool = item ? ITEMS[item.id] : null;
+  const rightTool = tool?.tool && tool.tool === def.tool;
+  const required = def.tool && def.minTier >= 0;
+  if (required && !(rightTool && tool.tier >= def.minTier)) return { time: def.hardness * 5, drops: false };
+  if (rightTool) return { time: (def.hardness * 1.5) / tool.speed, drops: true };
+  return { time: def.hardness * 1.5, drops: true };
+}
+
+function updateMining(dt) {
+  if (mining.cooldown > 0) mining.cooldown -= dt;
+  if (!mining.active || mining.cooldown > 0) {
+    if (!mining.active) { mining.progress = 0; mining.key = null; }
     return;
   }
-  world.set(hit.x, hit.y, hit.z, BLOCK.AIR);
+  const hit = blockTarget();
+  if (!hit) { mining.progress = 0; mining.key = null; return; }
+  const def = BLOCKS[hit.id];
+  const info = breakInfo(def, inventory.selectedItem);
+  if (!info) { mining.progress = 0; mining.key = null; return; }
+  const key = `${hit.x},${hit.y},${hit.z}`;
+  if (mining.key !== key) { mining.key = key; mining.progress = 0; }
+  if (player.creative) {
+    breakBlockAt(hit, false);
+    mining.cooldown = 0.25;
+    return;
+  }
+  mining.progress += dt / info.time;
+  if (mining.progress >= 1) {
+    breakBlockAt(hit, info.drops);
+    mining.progress = 0;
+    mining.key = null;
+    mining.cooldown = 0.25;
+    player.exhaustion += 0.005;
+  }
 }
 
-function placeBlock() {
-  const entry = HOTBAR[selected];
+function breakBlockAt(hit, withDrops) {
+  const def = BLOCKS[hit.id];
+  world.set(hit.x, hit.y, hit.z, BLOCK.AIR);
   hand.swing();
-  if (!entry.block) return; // 道具を持っているときは置けない
-  const hit = currentTarget();
+  if (!withDrops || player.creative) return;
+  if (def.drop) drops.spawn(def.drop, 1, hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+  if (def.dropChance) {
+    for (const [id, p] of Object.entries(def.dropChance)) if (Math.random() < p) drops.spawn(id, 1, hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+  }
+  // たいまつは支えを失うと落ちる
+  const above = world.get(hit.x, hit.y + 1, hit.z);
+  if (above === BLOCK.TORCH) { world.set(hit.x, hit.y + 1, hit.z, BLOCK.AIR); drops.spawn('torch', 1, hit.x + 0.5, hit.y + 1.3, hit.z + 0.5); }
+}
+
+// 右クリック / タップ: 使う・置く・食べる
+function use(instantEat = false) {
+  const item = inventory.selectedItem;
+  const def = item ? ITEMS[item.id] : null;
+  const hit = blockTarget();
+
+  // 作業台・かまどを開く (スニーク中は開かずにブロックを置ける)
+  if (hit && !player.sneaking && (hit.id === BLOCK.CRAFTING_TABLE || hit.id === BLOCK.FURNACE)) {
+    openInventory();
+    return;
+  }
+  if (def?.food) {
+    if (player.hunger >= 20 && !player.creative) return;
+    if (instantEat) eatNow();
+    return; // デスクトップでは長押しで食べる (updateUse)
+  }
+  if (def?.block !== undefined) placeBlock(hit, def.block);
+  else hand.swing();
+}
+
+function eatNow() {
+  const item = inventory.selectedItem;
+  const def = item ? ITEMS[item.id] : null;
+  if (!def?.food) return;
+  player.eat(def.food);
+  if (!player.creative) inventory.consumeSelected(1);
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+  hand.swing();
+  hud.toast(`${def.name}を食べた`);
+  eatTimer = 0;
+}
+
+function placeBlock(hit, id) {
+  hand.swing();
   if (!hit) return;
   const x = hit.x + hit.normal[0];
   const y = hit.y + hit.normal[1];
   const z = hit.z + hit.normal[2];
   if (!world.inBounds(x, y, z)) return;
-  if (player.intersectsBlock(x, y, z)) return;
-  world.set(x, y, z, entry.block);
+  const existing = world.get(x, y, z);
+  if (existing !== BLOCK.AIR && existing !== BLOCK.WATER) return;
+  const def = BLOCKS[id];
+  if (def.solid) {
+    if (intersectsBlock(player, x, y, z)) return;
+    for (const m of mobs.mobs) if (!m.dead && intersectsBlock(m, x, y, z)) return;
+  }
+  if (id === BLOCK.TORCH) {
+    // 支えになるブロックが必要
+    const supported = isSolid(world.get(x, y - 1, z)) || isSolid(world.get(x + 1, y, z)) || isSolid(world.get(x - 1, y, z)) || isSolid(world.get(x, y, z + 1)) || isSolid(world.get(x, y, z - 1));
+    if (!supported) return;
+  }
+  world.set(x, y, z, id);
+  if (!player.creative) {
+    inventory.consumeSelected(1);
+    hud.renderHotbar(inventory);
+    hand.setItem(inventory.selectedItem?.id ?? null);
+  }
+}
+
+// ホイールクリック: 見ているブロックを手に持つ
+function pickBlock() {
+  const hit = blockTarget();
+  if (!hit) return;
+  const itemId = BLOCKS[hit.id].item;
+  if (!itemId) return;
+  if (player.creative) inventory.pickBlock(itemId);
+  else {
+    for (let i = 0; i < HOTBAR_SIZE; i++) if (inventory.slots[i]?.id === itemId) { inventory.selected = i; break; }
+  }
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+}
+
+// 右クリック長押し: 連続設置 / 食事
+function updateUse(dt) {
+  if (!useHeld) return;
+  const item = inventory.selectedItem;
+  const def = item ? ITEMS[item.id] : null;
+  if (def?.food) {
+    if (player.hunger >= 20 && !player.creative) return;
+    eatTimer += dt;
+    if (Math.floor(eatTimer * 6) !== Math.floor((eatTimer - dt) * 6)) hand.swing();
+    if (eatTimer >= 1.6) eatNow();
+    return;
+  }
+  useRepeat += dt;
+  if (useRepeat >= 0.25) { useRepeat = 0; use(); }
 }
 
 // ---------- 昼夜サイクル ----------
 function updateSky(dt) {
   timeOfDay = (timeOfDay + dt / DAY_LENGTH) % 1;
-  const angle = timeOfDay * Math.PI * 2 - Math.PI / 2; // 0.25 で日の出
+  const angle = timeOfDay * Math.PI * 2 - Math.PI / 2;
   const sunHeight = Math.sin(angle);
   sun.position.set(Math.cos(angle) * 100, sunHeight * 100, 30);
-  const daylight = THREE.MathUtils.clamp(sunHeight * 2.5 + 0.2, 0, 1);
+  daylight = THREE.MathUtils.clamp(sunHeight * 2.5 + 0.2, 0, 1);
   const duskness = THREE.MathUtils.clamp(1 - Math.abs(sunHeight) * 6, 0, 1);
   skyColor.copy(skyNight).lerp(skyDay, daylight).lerp(skyDusk, duskness * daylight * 0.6);
-  sun.intensity = 0.9 * daylight;
-  hemi.intensity = 0.2 + 0.4 * daylight;
-  ambient.intensity = 0.18 + 0.25 * daylight;
+  sun.intensity = 0.4 + 0.5 * daylight;
+  hemi.intensity = 0.35 + 0.25 * daylight;
+  ambient.intensity = 0.25 + 0.15 * daylight;
+  world.setDaylight(daylight);
   scene.fog.color.copy(skyColor);
+}
+
+// ---------- 三人称 ----------
+const camDir = new THREE.Vector3();
+function updateCamera() {
+  player.syncCamera();
+  const sprintFov = player.sprinting ? BASE_FOV * 1.1 : BASE_FOV;
+  camera.fov += (sprintFov - camera.fov) * 0.2;
+  camera.updateProjectionMatrix();
+  if (!thirdPerson) {
+    playerModel.group.visible = false;
+    hand.visible = true;
+    return;
+  }
+  hand.visible = false;
+  camera.getWorldDirection(camDir);
+  const back = camDir.clone().negate();
+  const origin = player.eyePosition();
+  const hit = raycastVoxel(world, origin, back, 4);
+  const dist = hit ? Math.max(0.5, hit.distance - 0.3) : 4;
+  camera.position.copy(origin).addScaledVector(back, dist);
+  playerModel.group.visible = true;
+  playerModel.group.position.copy(player.position);
+  playerModel.group.rotation.y = player.yaw + Math.PI;
+  playerModel.parts.head.rotation.x = -player.pitch;
+  playerModel.animate(modelAnim, Math.hypot(player.velocity.x, player.velocity.z) / 2);
 }
 
 // ---------- メインループ ----------
 let last = performance.now();
-let frames = 0;
-let fpsTime = 0;
-let fps = 0;
 
 function loop(now) {
   requestAnimationFrame(loop);
   const dt = Math.min((now - last) / 1000, 0.05);
   last = now;
+  const active = playing();
 
-  if (playing()) player.update(dt);
+  if (active) {
+    player.update(dt);
+    updateMining(dt);
+    updateUse(dt);
+    if (player.moving) modelAnim += dt;
+  } else if (player.dead && deathEl.classList.contains('hidden')) {
+    onDeath();
+  }
   world.update(3);
   updateSky(dt);
-  hand.update(dt, playing() && player.moving);
+  mobs.update(dt, player, daylight, {
+    drops,
+    onPlayerHurt: () => hud.flashDamage(),
+    onExplosion: () => hud.toast('クリーパーが爆発した！'),
+  });
+  drops.update(dt, active ? player : null, inventory, () => { hud.renderHotbar(inventory); if (!hand.item && inventory.selectedItem) hand.setItem(inventory.selectedItem.id); });
+  if (player.dead && deathEl.classList.contains('hidden')) onDeath();
 
-  const hit = currentTarget();
-  highlight.visible = !!hit;
+  updateCamera();
+  hand.update(dt, active && player.moving, mining.active && !!mining.key);
+
+  // 選択枠とヒビ
+  const hit = active || screen.open ? blockTarget() : null;
+  const mob = active ? mobTarget() : null;
+  highlight.visible = !!hit && !mob;
   if (hit) highlight.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+  if (mining.key && mining.progress > 0 && hit) {
+    crackMesh.visible = true;
+    crackMesh.position.copy(highlight.position);
+    crack.texture.offset.x = Math.min(crack.stages - 1, Math.floor(mining.progress * crack.stages)) / crack.stages;
+  } else crackMesh.visible = false;
 
   // 水中の見た目
   const inWaterHead = world.get(Math.floor(camera.position.x), Math.floor(camera.position.y), Math.floor(camera.position.z)) === BLOCK.WATER;
   if (inWaterHead) {
-    scene.fog.near = 2;
-    scene.fog.far = 24;
+    scene.fog.near = 2; scene.fog.far = 24;
     scene.fog.color.set(0x1d4f9e);
     scene.background = scene.fog.color;
   } else {
-    scene.fog.near = 60;
-    scene.fog.far = 150;
+    scene.fog.near = 60; scene.fog.far = 150;
     scene.background = skyColor;
   }
 
+  hud.updateStats(player);
   frames++;
   fpsTime += dt;
   if (fpsTime >= 0.5) {
     fps = Math.round(frames / fpsTime);
-    frames = 0;
-    fpsTime = 0;
-    const p = player.position;
-    const hours = Math.floor(timeOfDay * 24);
-    const mins = Math.floor((timeOfDay * 24 - hours) * 60);
-    infoEl.textContent =
-      `FPS ${fps}\n` +
-      `XYZ ${p.x.toFixed(1)} / ${p.y.toFixed(1)} / ${p.z.toFixed(1)}\n` +
-      `時刻 ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}\n` +
-      `モード ${player.flying ? '飛行' : player.inWater ? '水泳' : '歩行'}\n` +
-      `手持ち ${entryName(HOTBAR[selected])}` +
-      (hit ? `\n注視 ${BLOCKS[hit.id].name}` : '');
+    frames = 0; fpsTime = 0;
+    if (showDebug) {
+      const p = player.position;
+      const hours = Math.floor(timeOfDay * 24), mins = Math.floor((timeOfDay * 24 - hours) * 60);
+      const bx = Math.floor(p.x), by = Math.floor(p.y), bz = Math.floor(p.z);
+      hud.setDebug(
+        `FPS ${fps}\nXYZ ${p.x.toFixed(2)} / ${p.y.toFixed(2)} / ${p.z.toFixed(2)}\n` +
+        `Block ${bx} ${by} ${bz}\n時刻 ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}\n` +
+        `明るさ 空 ${world.lighting.skyAt(bx, by, bz)} 光源 ${world.lighting.blockAt(bx, by, bz)}\n` +
+        `モード ${player.gameMode}${player.flying ? ' 飛行' : ''}${player.sneaking ? ' スニーク' : ''}${player.sprinting ? ' ダッシュ' : ''}\n` +
+        `モブ ${mobs.mobs.length}  ドロップ ${drops.items.length}\n` +
+        `手持ち ${inventory.selectedItem ? itemName(inventory.selectedItem.id) : 'なし'}` +
+        (hit ? `\n注視 ${BLOCKS[hit.id].name} (${hit.x} ${hit.y} ${hit.z})` : '') +
+        (mob ? `\n対象 ${mob.def.name} HP ${mob.health}` : ''),
+      );
+    }
   }
 
-  if (playing() && performance.now() - lastSave > 10000) save();
+  if ((locked || touchPlaying) && performance.now() - lastSave > 10000) save();
 
   renderer.clear();
   renderer.render(scene, camera);
   hand.render(renderer);
 }
 
+function onDeath() {
+  stopMining();
+  useHeld = false;
+  touch.setEnabled(false);
+  if (!player.creative) {
+    const all = inventory.takeAll();
+    drops.spawnStacks(all, player.position.x, player.position.y + 0.5, player.position.z);
+    hud.renderHotbar(inventory);
+    hand.setItem(null);
+  }
+  $('death-cause').textContent = `場所: ${Math.floor(player.position.x)}, ${Math.floor(player.position.y)}, ${Math.floor(player.position.z)}`;
+  deathEl.classList.remove('hidden');
+  if (locked) document.exitPointerLock();
+  save();
+}
+
 // ---------- 起動 ----------
 const saved = loadSave();
-createWorld(saved?.seed ?? 20240601, saved);
+createWorld(saved?.seed ?? DEFAULT_SEED, saved, 'survival');
 requestAnimationFrame(loop);
 
 // デバッグ / 自動テスト用フック
 window.__mycra = {
   get world() { return world; },
   get player() { return player; },
+  get inventory() { return inventory; },
+  get mobs() { return mobs; },
+  get drops() { return drops; },
   get hand() { return hand; },
   get touch() { return touch; },
-  breakBlock, placeBlock, save, selectSlot, currentTarget, startTouchPlay, showMenu,
+  get screen() { return screen; },
+  get timeOfDay() { return timeOfDay; },
+  set timeOfDay(v) { timeOfDay = v; },
+  blockTarget, mobTarget, attack, startMining, stopMining, use, placeBlock, pickBlock, save, selectSlot,
+  startTouchPlay, showMenu, openInventory, closeInventory, breakBlockAt, eatNow,
+  set thirdPerson(v) { thirdPerson = v; },
 };

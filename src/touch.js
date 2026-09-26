@@ -1,7 +1,7 @@
-// タブレット / スマートフォン向けのタッチ操作
-//  - 画面左側: 仮想ジョイスティック (触れた位置が中心になる)
-//  - 画面右側: ドラッグで視点移動、タップで設置、長押しで破壊
-//  - ボタン: ジャンプ / 下降 / 壊す / 置く / 飛行 / メニュー
+// タブレット / スマートフォン向けのタッチ操作 (Minecraft Bedrock 版に準拠)
+//  - 画面左側: 仮想ジョイスティック (触れた位置が中心。外側までなぞるとダッシュ)
+//  - 画面右側: ドラッグで視点移動、タップで設置 / 使用 / 攻撃、長押しで破壊
+//  - ボタン: ジャンプ (二度押しで飛行) / スニーク / 壊す / 置く / 持ち物 / メニュー
 export function isTouchDevice() {
   return (
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
@@ -11,8 +11,7 @@ export function isTouchDevice() {
 
 const JOY_RADIUS = 48;
 const TAP_MS = 300;
-const HOLD_MS = 450;
-const HOLD_REPEAT_MS = 330;
+const HOLD_MS = 350;
 const MOVE_TOLERANCE = 12;
 
 export class TouchControls {
@@ -21,12 +20,10 @@ export class TouchControls {
     this.player = player;
     this.h = handlers;
     this.enabled = false;
-
     this.joyEl = root.querySelector('#joystick');
     this.knobEl = root.querySelector('#joystick-knob');
-    this.joy = null; // { id, ox, oy }
-    this.look = null; // { id, x, y, startX, startY, t0, moved, holdTimer, repeatTimer }
-
+    this.joy = null;
+    this.look = null;
     this.bindButtons();
     this.bindPointers();
   }
@@ -44,36 +41,35 @@ export class TouchControls {
   reset() {
     if (!this.player) return;
     this.joy = null;
-    this.clearLook();
-    this.player.touch.forward = 0;
-    this.player.touch.strafe = 0;
-    this.player.touch.jump = false;
-    this.player.touch.down = false;
-    this.player.touch.sprint = false;
+    this.clearLook(true);
+    const t = this.player.touch;
+    t.forward = 0; t.strafe = 0; t.jump = false; t.sprint = false; t.sneak = false;
+    this.root.querySelector('#btn-sneak').classList.remove('on');
     this.joyEl.classList.remove('active');
   }
 
   bindButtons() {
-    const hold = (id, key) => {
-      const el = this.root.querySelector(id);
-      const on = (e) => { e.preventDefault(); e.stopPropagation(); this.player.touch[key] = true; };
-      const off = (e) => { e.preventDefault(); this.player.touch[key] = false; };
-      el.addEventListener('pointerdown', on);
-      el.addEventListener('pointerup', off);
-      el.addEventListener('pointercancel', off);
-      el.addEventListener('pointerleave', off);
+    const q = (id) => this.root.querySelector(id);
+    const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+    const hold = (id, on, off) => {
+      const el = q(id);
+      el.addEventListener('pointerdown', (e) => { stop(e); on(e); });
+      const end = (e) => { e.preventDefault(); off(e); };
+      el.addEventListener('pointerup', end);
+      el.addEventListener('pointercancel', end);
+      el.addEventListener('pointerleave', end);
     };
-    const tap = (id, fn) => {
-      const el = this.root.querySelector(id);
-      el.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); fn(); });
-    };
-    hold('#btn-jump', 'jump');
-    hold('#btn-down', 'down');
-    hold('#btn-sprint', 'sprint');
-    tap('#btn-break', () => this.h.onBreak());
-    tap('#btn-place', () => this.h.onPlace());
-    tap('#btn-fly', () => this.h.onFly());
-    tap('#btn-menu', () => this.h.onMenu());
+    hold('#btn-jump', () => { this.player.touch.jump = true; this.h.onJumpPress(); }, () => { this.player.touch.jump = false; });
+    hold('#btn-sprint', () => { this.player.touch.sprint = true; }, () => { this.player.touch.sprint = false; });
+    hold('#btn-break', () => this.h.onMineStart(), () => this.h.onMineEnd());
+    q('#btn-sneak').addEventListener('pointerdown', (e) => {
+      stop(e);
+      this.player.touch.sneak = !this.player.touch.sneak;
+      q('#btn-sneak').classList.toggle('on', this.player.touch.sneak);
+    });
+    q('#btn-place').addEventListener('pointerdown', (e) => { stop(e); this.h.onUse(); });
+    q('#btn-inv').addEventListener('pointerdown', (e) => { stop(e); this.h.onInventory(); });
+    q('#btn-menu').addEventListener('pointerdown', (e) => { stop(e); this.h.onMenu(); });
   }
 
   bindPointers() {
@@ -90,18 +86,13 @@ export class TouchControls {
         this.moveKnob(0, 0);
       } else if (!this.look) {
         const look = {
-          id: e.pointerId, x: e.clientX, y: e.clientY,
-          startX: e.clientX, startY: e.clientY, t0: e.timeStamp, moved: false,
-          holdTimer: 0, repeatTimer: 0, broke: false,
+          id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY,
+          t0: e.timeStamp, moved: false, mining: false, holdTimer: 0,
         };
         look.holdTimer = setTimeout(() => {
           if (this.look !== look || look.moved) return;
-          look.broke = true;
-          this.h.onBreak();
-          look.repeatTimer = setInterval(() => {
-            if (this.look !== look || look.moved) { clearInterval(look.repeatTimer); return; }
-            this.h.onBreak();
-          }, HOLD_REPEAT_MS);
+          look.mining = true;
+          this.h.onMineStart();
         }, HOLD_MS);
         this.look = look;
       }
@@ -127,7 +118,7 @@ export class TouchControls {
         if (!l.moved && Math.hypot(e.clientX - l.startX, e.clientY - l.startY) > MOVE_TOLERANCE) {
           l.moved = true;
           clearTimeout(l.holdTimer);
-          clearInterval(l.repeatTimer);
+          // 長押し中に動かしても採掘は続ける (視点を動かしながら掘れる)
         }
         this.h.onLook(dx * 2.2, dy * 2.2);
       }
@@ -143,21 +134,19 @@ export class TouchControls {
       } else if (this.look && e.pointerId === this.look.id) {
         const l = this.look;
         const dt = e.timeStamp - l.t0;
-        this.lastTap = { dt, moved: l.moved, broke: l.broke, type: e.type };
-        if (!l.moved && !l.broke && dt < TAP_MS && e.type === 'pointerup') this.h.onPlace();
-        this.clearLook();
+        this.lastTap = { dt, moved: l.moved, mining: l.mining, type: e.type };
+        if (!l.moved && !l.mining && dt < TAP_MS && e.type === 'pointerup') this.h.onUse();
+        this.clearLook(l.mining);
       }
     };
     surface.addEventListener('pointerup', end);
     surface.addEventListener('pointercancel', end);
   }
 
-  clearLook() {
-    if (this.look) {
-      clearTimeout(this.look.holdTimer);
-      clearInterval(this.look.repeatTimer);
-    }
+  clearLook(wasMining) {
+    if (this.look) clearTimeout(this.look.holdTimer);
     this.look = null;
+    if (wasMining) this.h.onMineEnd();
   }
 
   moveKnob(dx, dy) {
