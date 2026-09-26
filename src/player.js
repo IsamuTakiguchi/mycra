@@ -26,6 +26,9 @@ export class Player {
     this.inWater = false;
     this.flying = false;
     this.keys = new Set();
+    // タッチ操作からのアナログ入力 (-1..1) とボタン状態
+    this.touch = { forward: 0, strafe: 0, jump: false, down: false, sprint: false };
+    this.moving = false;
     this.camera.rotation.order = 'YXZ';
   }
 
@@ -67,18 +70,22 @@ export class Player {
 
   update(dt) {
     const k = this.keys;
-    const forward = (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0);
-    const strafe = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0);
-    const sprint = k.has('ShiftLeft') || k.has('ShiftRight');
-    const jump = k.has('Space');
+    const t = this.touch;
+    const clamp1 = (v) => Math.max(-1, Math.min(1, v));
+    const forward = clamp1((k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0) + t.forward);
+    const strafe = clamp1((k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0) + t.strafe);
+    const sprint = k.has('ShiftLeft') || k.has('ShiftRight') || t.sprint;
+    const jump = k.has('Space') || t.jump;
+    const down = k.has('ControlLeft') || k.has('ControlRight') || t.down;
 
     // yaw を基準に移動方向を求める
     const sin = Math.sin(this.yaw);
     const cos = Math.cos(this.yaw);
     let mx = -sin * forward + cos * strafe;
     let mz = -cos * forward - sin * strafe;
-    const len = Math.hypot(mx, mz);
-    if (len > 0) { mx /= len; mz /= len; }
+    let len = Math.hypot(mx, mz);
+    if (len > 1) { mx /= len; mz /= len; len = 1; }
+    this.moving = len > 0.05;
 
     const p = this.position;
     const feet = this.world.get(Math.floor(p.x), Math.floor(p.y + 0.2), Math.floor(p.z));
@@ -91,7 +98,7 @@ export class Player {
       const target = new THREE.Vector3(mx * speed, 0, mz * speed);
       if (jump) target.y += speed;
       if (sprint && !jump && len === 0) target.y -= speed;
-      if (k.has('ControlLeft') || k.has('ControlRight')) target.y -= speed;
+      if (down) target.y -= speed;
       const blend = 1 - Math.exp(-dt * 12);
       this.velocity.lerp(target, blend);
     } else if (this.inWater) {
@@ -127,6 +134,7 @@ export class Player {
     if (p.y < -20) {
       this.spawn(Math.floor(p.x), Math.floor(p.z));
     }
+    if (!this.onGround && !this.flying && !this.inWater) this.moving = this.moving && Math.abs(this.velocity.y) < 2;
 
     this.syncCamera();
   }
