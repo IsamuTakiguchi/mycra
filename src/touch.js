@@ -1,7 +1,8 @@
 // タブレット / スマートフォン向けのタッチ操作 (Minecraft Bedrock 版に準拠)
 //  - 画面左側: 仮想ジョイスティック (触れた位置が中心。外側までなぞるとダッシュ)
-//  - 画面右側: ドラッグで視点移動、タップで設置 / 使用 / 攻撃、長押しで破壊
-//  - ボタン: ジャンプ (二度押しで飛行) / スニーク / 壊す / 置く / 持ち物 / メニュー
+//  - 画面右側: ドラッグで視点移動。タップした場所のブロックに設置 / 使用 / 攻撃、
+//    長押しした場所のブロックを破壊 (指を動かしても指の下のブロックを掘り続ける)
+//  - ボタン: ジャンプ (二度押しで飛行) / スニーク / 持ち物 / メニュー
 export function isTouchDevice() {
   return (
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
@@ -11,8 +12,8 @@ export function isTouchDevice() {
 
 const JOY_RADIUS = 48;
 const TAP_MS = 300;
-const HOLD_MS = 350;
-const MOVE_TOLERANCE = 12;
+const HOLD_MS = 250;
+const MOVE_TOLERANCE = 18;
 
 export class TouchControls {
   constructor(root, player, handlers) {
@@ -60,14 +61,11 @@ export class TouchControls {
       el.addEventListener('pointerleave', end);
     };
     hold('#btn-jump', () => { this.player.touch.jump = true; this.h.onJumpPress(); }, () => { this.player.touch.jump = false; });
-    hold('#btn-sprint', () => { this.player.touch.sprint = true; }, () => { this.player.touch.sprint = false; });
-    hold('#btn-break', () => this.h.onMineStart(), () => this.h.onMineEnd());
     q('#btn-sneak').addEventListener('pointerdown', (e) => {
       stop(e);
       this.player.touch.sneak = !this.player.touch.sneak;
       q('#btn-sneak').classList.toggle('on', this.player.touch.sneak);
     });
-    q('#btn-place').addEventListener('pointerdown', (e) => { stop(e); this.h.onUse(); });
     q('#btn-inv').addEventListener('pointerdown', (e) => { stop(e); this.h.onInventory(); });
     q('#btn-menu').addEventListener('pointerdown', (e) => { stop(e); this.h.onMenu(); });
   }
@@ -92,7 +90,7 @@ export class TouchControls {
         look.holdTimer = setTimeout(() => {
           if (this.look !== look || look.moved) return;
           look.mining = true;
-          this.h.onMineStart();
+          this.h.onMineStart(look.x, look.y);
         }, HOLD_MS);
         this.look = look;
       }
@@ -118,8 +116,9 @@ export class TouchControls {
         if (!l.moved && Math.hypot(e.clientX - l.startX, e.clientY - l.startY) > MOVE_TOLERANCE) {
           l.moved = true;
           clearTimeout(l.holdTimer);
-          // 長押し中に動かしても採掘は続ける (視点を動かしながら掘れる)
         }
+        // 長押し中に動かしても、指の下のブロックを掘り続ける
+        if (l.mining) this.h.onMineMove(l.x, l.y);
         this.h.onLook(dx * 2.2, dy * 2.2);
       }
     });
@@ -135,7 +134,7 @@ export class TouchControls {
         const l = this.look;
         const dt = e.timeStamp - l.t0;
         this.lastTap = { dt, moved: l.moved, mining: l.mining, type: e.type };
-        if (!l.moved && !l.mining && dt < TAP_MS && e.type === 'pointerup') this.h.onUse();
+        if (!l.moved && !l.mining && dt < TAP_MS && e.type === 'pointerup') this.h.onUse(l.x, l.y);
         this.clearLook(l.mining);
       }
     };
