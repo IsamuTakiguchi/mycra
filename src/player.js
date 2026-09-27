@@ -15,6 +15,27 @@ const EYE_SNEAK = 1.27;
 export const MAX_HEALTH = 20;
 export const MAX_HUNGER = 20;
 
+// Minecraft と同じゲームモードと難易度
+export const GAME_MODES = {
+  survival: 'サバイバル',
+  creative: 'クリエイティブ',
+  adventure: 'アドベンチャー',
+  spectator: 'スペクテイター',
+};
+export const DIFFICULTIES = {
+  peaceful: 'ピースフル',
+  easy: 'イージー',
+  normal: 'ノーマル',
+  hard: 'ハード',
+};
+// 敵からのダメージ倍率と、飢えで減る体力の下限
+const DIFFICULTY_RULES = {
+  peaceful: { mobDamage: 0, starveFloor: MAX_HEALTH },
+  easy: { mobDamage: 0.5, starveFloor: 10 },
+  normal: { mobDamage: 1, starveFloor: 1 },
+  hard: { mobDamage: 1.5, starveFloor: 0 },
+};
+
 export class Player {
   constructor(world, camera) {
     this.world = world;
@@ -32,6 +53,7 @@ export class Player {
     this.sneaking = false;
     this.sprinting = false;
     this.gameMode = 'survival';
+    this.difficulty = 'normal';
     this.health = MAX_HEALTH;
     this.hunger = MAX_HUNGER;
     this.exhaustion = 0;
@@ -52,6 +74,41 @@ export class Player {
 
   get creative() {
     return this.gameMode === 'creative';
+  }
+
+  get spectator() {
+    return this.gameMode === 'spectator';
+  }
+
+  // 体力・満腹度があるモード
+  get hasStats() {
+    return this.gameMode === 'survival' || this.gameMode === 'adventure';
+  }
+
+  // ブロックを壊したり置いたりできるモード (アドベンチャーとスペクテイターは不可)
+  get canBuild() {
+    return this.gameMode === 'survival' || this.gameMode === 'creative';
+  }
+
+  // モブに狙われず、拾得もしないモード
+  get ignoredByMobs() {
+    return this.creative || this.spectator;
+  }
+
+  // 素材を消費するモード
+  get consumesItems() {
+    return this.hasStats;
+  }
+
+  setGameMode(mode) {
+    if (!GAME_MODES[mode]) return;
+    this.gameMode = mode;
+    if (mode === 'spectator') { this.flying = true; this.velocity.set(0, 0, 0); }
+    else if (mode !== 'creative') this.flying = false;
+    this.sneaking = false;
+    this.sprinting = false;
+    this.fallDistance = 0;
+    this.dead = false;
   }
 
   spawn(x, z) {
@@ -87,18 +144,24 @@ export class Player {
   }
 
   setFlying(on) {
-    if (!this.creative) on = false;
+    if (this.spectator) on = true;
+    if (!this.creative && !this.spectator) on = false;
     this.flying = on;
     this.velocity.y = 0;
     this.fallDistance = 0;
     return on;
   }
 
-  // ダメージ (true: 適用された)
-  damage(amount, knockback = null) {
+  // ダメージ (true: 適用された)。fromMob のときは難易度で倍率がかかる
+  damage(amount, knockback = null, fromMob = false) {
     if (this.dead || amount <= 0) return false;
-    if (this.creative) return false;
+    if (!this.hasStats) return false;
     if (this.hurtTimer > 0) return false;
+    if (fromMob) {
+      amount = amount * DIFFICULTY_RULES[this.difficulty].mobDamage;
+      if (amount <= 0) return false;
+      amount = Math.max(1, Math.round(amount));
+    }
     this.health = Math.max(0, this.health - amount);
     this.hurtTimer = 0.5;
     if (knockback) {
@@ -126,8 +189,8 @@ export class Player {
 
     // Minecraft: Shift はスニーク (飛行中は下降)。Ctrl または W 二度押しでダッシュ
     this.sneaking = sneakHeld && !this.flying;
-    if (ctrl && forward > 0.5 && !this.sneaking && (this.creative || this.hunger > 6)) this.sprinting = true;
-    if (forward <= 0.5 || this.sneaking || this.hitWall || (!this.creative && this.hunger <= 6)) this.sprinting = false;
+    if (ctrl && forward > 0.5 && !this.sneaking && (!this.hasStats || this.hunger > 6)) this.sprinting = true;
+    if (forward <= 0.5 || this.sneaking || this.hitWall || (this.hasStats && this.hunger <= 6)) this.sprinting = false;
 
     const sin = Math.sin(this.yaw);
     const cos = Math.cos(this.yaw);
@@ -141,6 +204,24 @@ export class Player {
     const head = this.world.get(Math.floor(p.x), Math.floor(p.y + this.eyeHeight), Math.floor(p.z));
     this.inWater = feetInWater(this.world, this) || head === BLOCK.WATER;
     const headInWater = head === BLOCK.WATER;
+
+    if (this.spectator) {
+      // スペクテイター: 常に飛行し、ブロックをすり抜ける
+      this.flying = true;
+      const speed = this.sprinting ? FLY_SPEED * 2.5 : FLY_SPEED * 1.3;
+      const target = new THREE.Vector3(mx * speed, 0, mz * speed);
+      if (jump) target.y += speed;
+      if (sneakHeld) target.y -= speed;
+      this.velocity.lerp(target, 1 - Math.exp(-dt * 12));
+      p.addScaledVector(this.velocity, dt);
+      this.onGround = false;
+      this.hitWall = false;
+      if (this.hurtTimer > 0) this.hurtTimer -= dt;
+      if (this.attackCooldown > 0) this.attackCooldown -= dt;
+      this.eyeHeight += (EYE_STAND - this.eyeHeight) * (1 - Math.exp(-dt * 20));
+      this.syncCamera();
+      return;
+    }
 
     if (this.flying) {
       const speed = this.sprinting ? FLY_SPEED * 2 : FLY_SPEED;
@@ -196,17 +277,29 @@ export class Player {
     }
     if (this.moving && this.onGround) this.exhaustion += (this.sprinting ? 0.1 : 0.01) * len * WALK_SPEED * dt;
 
-    // 空腹・回復
-    if (!this.creative && !this.dead) {
-      if (this.exhaustion >= 4) { this.exhaustion -= 4; this.hunger = Math.max(0, this.hunger - 1); }
-      if (this.hunger >= 18 && this.health < MAX_HEALTH) {
+    // 空腹・回復 (難易度で変わる)
+    if (this.hasStats && !this.dead) {
+      const rules = DIFFICULTY_RULES[this.difficulty];
+      if (this.difficulty === 'peaceful') {
+        // ピースフル: 満腹度は減らず、体力は常に回復する
+        this.exhaustion = 0;
+        this.hunger = Math.min(MAX_HUNGER, this.hunger + dt * 0.5);
         this.regenTimer += dt;
-        if (this.regenTimer >= 4) { this.regenTimer = 0; this.health = Math.min(MAX_HEALTH, this.health + 1); this.exhaustion += 6; }
-      } else this.regenTimer = 0;
-      if (this.hunger <= 0) {
-        this.starveTimer += dt;
-        if (this.starveTimer >= 4) { this.starveTimer = 0; if (this.health > 1) { this.health -= 1; this.hurtTimer = 0.5; } }
-      } else this.starveTimer = 0;
+        if (this.regenTimer >= 0.5) { this.regenTimer = 0; this.health = Math.min(MAX_HEALTH, this.health + 1); }
+      } else {
+        if (this.exhaustion >= 4) { this.exhaustion -= 4; this.hunger = Math.max(0, this.hunger - 1); }
+        if (this.hunger >= 18 && this.health < MAX_HEALTH) {
+          this.regenTimer += dt;
+          if (this.regenTimer >= 4) { this.regenTimer = 0; this.health = Math.min(MAX_HEALTH, this.health + 1); this.exhaustion += 6; }
+        } else this.regenTimer = 0;
+        if (this.hunger <= 0) {
+          this.starveTimer += dt;
+          if (this.starveTimer >= 4) {
+            this.starveTimer = 0;
+            if (this.health > rules.starveFloor) { this.health -= 1; this.hurtTimer = 0.5; if (this.health <= 0) this.dead = true; }
+          }
+        } else this.starveTimer = 0;
+      }
     }
 
     if (this.hurtTimer > 0) this.hurtTimer -= dt;
@@ -214,7 +307,7 @@ export class Player {
 
     // 奈落に落ちたら復帰
     if (p.y < -20) {
-      if (this.creative) this.spawn(Math.floor(p.x), Math.floor(p.z));
+      if (!this.hasStats) this.spawn(Math.floor(p.x), Math.floor(p.z));
       else { this.health = 0; this.dead = true; }
     }
 
