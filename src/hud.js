@@ -1,9 +1,11 @@
-import { drawItemIcon, itemName } from './items.js';
+import { itemName } from './items.js';
+import { drawItemIcon } from './icons.js';
 import { HOTBAR_SIZE } from './inventory.js';
-import { MAX_HEALTH, MAX_HUNGER } from './player.js';
+import { setDurability } from './ui.js';
 
 const HEART = ['.kk.kk.', 'krrkrrk', 'krrrrrk', 'krrrrrk', '.krrrk.', '..krk..', '...k...'];
 const FOOD = ['...kkk.', '..kmmmk', '..kmmmk', '.kkmmk.', 'kbkkk..', 'kbbk...', '.kk....'];
+const ARMOR = ['kk...kk', 'kakkkak', 'kaaaaak', '.kaaak.', '.kaaak.', '.kaaak.', '..kkk..'];
 
 function drawIcon(canvas, rows, fill, state) {
   // state: 2 = 満, 1 = 半分, 0 = 空
@@ -29,10 +31,12 @@ export class HUD {
     this.els = els;
     this.lastHealth = -1;
     this.lastHunger = -1;
+    this.lastArmor = -1;
     this.lastMode = '';
     this.toastTimer = 0;
     this.hearts = [];
     this.foods = [];
+    this.armors = [];
     for (let i = 0; i < 10; i++) {
       const h = document.createElement('canvas');
       h.className = 'stat-icon';
@@ -42,17 +46,24 @@ export class HUD {
       f.className = 'stat-icon';
       els.hunger.appendChild(f);
       this.foods.push(f);
+      const a = document.createElement('canvas');
+      a.className = 'stat-icon';
+      els.armor.appendChild(a);
+      this.armors.push(a);
     }
     this.slotEls = [];
     for (let i = 0; i < HOTBAR_SIZE; i++) {
       const slot = document.createElement('div');
       slot.className = 'slot';
       const c = document.createElement('canvas');
+      c.width = 32; c.height = 32;
       const count = document.createElement('span');
       count.className = 'count';
-      slot.append(c, count);
+      const bar = document.createElement('div');
+      bar.className = 'dur';
+      slot.append(c, count, bar);
       els.hotbar.appendChild(slot);
-      this.slotEls.push({ slot, canvas: c, count, key: '' });
+      this.slotEls.push({ slot, canvas: c, count, bar, key: '' });
     }
     this.nameTimer = 0;
   }
@@ -61,7 +72,7 @@ export class HUD {
     for (let i = 0; i < HOTBAR_SIZE; i++) {
       const s = inventory.slots[i];
       const el = this.slotEls[i];
-      const key = s ? `${s.id}:${s.count}` : '';
+      const key = s ? `${s.id}:${s.count}:${s.damage ?? 0}` : '';
       if (el.key !== key) {
         el.key = key;
         if (s) {
@@ -72,6 +83,7 @@ export class HUD {
           el.canvas.style.visibility = 'hidden';
           el.count.textContent = '';
         }
+        setDurability(el.bar, s);
       }
       el.slot.classList.toggle('selected', i === inventory.selected);
     }
@@ -86,7 +98,7 @@ export class HUD {
     this.nameTimer = setTimeout(() => this.els.itemName.classList.remove('show'), 1500);
   }
 
-  updateStats(player) {
+  updateStats(player, armorPoints = 0) {
     const noStats = !player.hasStats;
     if (this.lastMode !== player.gameMode) {
       this.lastMode = player.gameMode;
@@ -109,8 +121,15 @@ export class HUD {
         drawIcon(this.foods[i], FOOD, { m: '#c07030', b: '#f0e0c0' }, v >= 2 ? 2 : v === 1 ? 1 : 0);
       }
     }
+    if (armorPoints !== this.lastArmor) {
+      this.lastArmor = armorPoints;
+      this.els.armor.style.visibility = armorPoints > 0 ? 'visible' : 'hidden';
+      for (let i = 0; i < 10; i++) {
+        const v = armorPoints - i * 2;
+        drawIcon(this.armors[i], ARMOR, { a: '#d8d8e0' }, v >= 2 ? 2 : v === 1 ? 1 : 0);
+      }
+    }
     this.els.hearts.classList.toggle('low', hp <= 4);
-    void MAX_HEALTH; void MAX_HUNGER;
   }
 
   flashDamage() {

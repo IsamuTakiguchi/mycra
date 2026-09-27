@@ -1,4 +1,4 @@
-import { BLOCKS, isOpaque } from './blocks.js';
+import { OPAQUE, LIGHT } from './blocks.js';
 import { CHUNK_SIZE, WORLD_HEIGHT } from './constants.js';
 
 // Minecraft 風のライティング
@@ -33,7 +33,7 @@ export class Lighting {
       for (let z = 0; z < size; z++) {
         const base = (x * size + z) * H;
         for (let y = H - 1; y >= 0; y--) {
-          if (isOpaque(world.data[base + y])) break;
+          if (OPAQUE[world.data[base + y]]) break;
           sky[base + y] = 15;
           queue[tail++] = base + y;
         }
@@ -43,7 +43,7 @@ export class Lighting {
 
     tail = 0;
     for (let i = 0; i < world.data.length; i++) {
-      const l = BLOCKS[world.data[i]]?.light ?? 0;
+      const l = LIGHT[world.data[i]];
       if (l > 0) { block[i] = l; queue[tail++] = i; }
     }
     this.propagate(block, tail, 0, size - 1, 0, size - 1);
@@ -63,12 +63,12 @@ export class Lighting {
       const x = Math.floor(i / strideX);
       const nl = l - 1;
       // 6 近傍
-      if (y > 0) { const n = i - 1; if (!isOpaque(data[n]) && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
-      if (y < H - 1) { const n = i + 1; if (!isOpaque(data[n]) && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
-      if (z > zs) { const n = i - strideZ; if (!isOpaque(data[n]) && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
-      if (z < ze) { const n = i + strideZ; if (!isOpaque(data[n]) && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
-      if (x > xs) { const n = i - strideX; if (!isOpaque(data[n]) && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
-      if (x < xe) { const n = i + strideX; if (!isOpaque(data[n]) && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
+      if (y > 0) { const n = i - 1; if (!OPAQUE[data[n]] && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
+      if (y < H - 1) { const n = i + 1; if (!OPAQUE[data[n]] && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
+      if (z > zs) { const n = i - strideZ; if (!OPAQUE[data[n]] && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
+      if (z < ze) { const n = i + strideZ; if (!OPAQUE[data[n]] && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
+      if (x > xs) { const n = i - strideX; if (!OPAQUE[data[n]] && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
+      if (x < xe) { const n = i + strideX; if (!OPAQUE[data[n]] && light[n] < nl) { light[n] = nl; queue[tail++] = n; } }
     }
   }
 
@@ -104,7 +104,7 @@ export class Lighting {
           const base = (x * size + z) * H;
           for (let y = 0; y < H; y++) {
             const i = base + y;
-            if (isOpaque(data[i])) continue;
+            if (OPAQUE[data[i]]) continue;
             let best = light[i];
             if (x === xs && x > 0) best = Math.max(best, light[i - strideX] - 1);
             if (x === xe && x < size - 1) best = Math.max(best, light[i + strideX] - 1);
@@ -123,7 +123,7 @@ export class Lighting {
       for (let z = zs; z <= ze; z++) {
         const base = (x * size + z) * H;
         for (let y = H - 1; y >= 0; y--) {
-          if (isOpaque(data[base + y])) break;
+          if (OPAQUE[data[base + y]]) break;
           sky[base + y] = 15;
           queue[tail++] = base + y;
         }
@@ -138,7 +138,7 @@ export class Lighting {
       for (let z = zs; z <= ze; z++) {
         const base = (x * size + z) * H;
         for (let y = 0; y < H; y++) {
-          const l = BLOCKS[data[base + y]]?.light ?? 0;
+          const l = LIGHT[data[base + y]];
           if (l > 0) { block[base + y] = l; queue[tail++] = base + y; }
         }
       }

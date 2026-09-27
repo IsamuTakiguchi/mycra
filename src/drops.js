@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { ITEMS, itemPixel } from './items.js';
-import { BLOCKS, createAtlas, tileUV, TILE_PX } from './blocks.js';
+import { ITEMS, normalizeItemId } from './items.js';
+import { faceTile, createAtlas, tileUV } from './blocks.js';
+import { iconKind, isoHeight, iconMeta, spritePixels } from './icons.js';
 import { moveEntity, feetInWater } from './physics.js';
 
 const GRAVITY = 16;
@@ -11,67 +12,60 @@ const meshCache = new Map();
 let blockMaterial = null;
 const spriteMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
 
-// アイテムの見た目 (ブロックは小さな立方体、それ以外はドット絵を押し出したもの)
+// アイテムの見た目。ブロックは小さな立体、それ以外はドット絵を押し出したもの
 export function buildItemMesh(id) {
   if (meshCache.has(id)) return meshCache.get(id).clone();
   const def = ITEMS[id];
   let mesh;
-  if (def.block !== undefined) {
+  if (iconKind(id) === 'iso') {
     if (!blockMaterial) blockMaterial = new THREE.MeshLambertMaterial({ map: createAtlas().texture, alphaTest: 0.5, side: THREE.DoubleSide });
-    const tiles = BLOCKS[def.block].tiles;
-    if (BLOCKS[def.block].model === 'torch') {
-      // 細い柱。全面にタイルの x=7..9, y=0..10 px を貼る
-      const geo = new THREE.BoxGeometry(2 / 16, 10 / 16, 2 / 16);
-      const [u0, v0, u1, v1] = tileUV(tiles[0]);
-      const uw = u1 - u0, vh = v1 - v0;
-      const su0 = u0 + uw * (7 / 16), su1 = u0 + uw * (9 / 16), sv1 = v1, sv0 = v1 - vh * (10 / 16);
-      const uv = geo.attributes.uv;
-      for (let f = 0; f < 6; f++) {
-        const base = f * 4;
-        uv.setXY(base, su0, sv1); uv.setXY(base + 1, su1, sv1); uv.setXY(base + 2, su0, sv0); uv.setXY(base + 3, su1, sv0);
-      }
-      mesh = new THREE.Mesh(geo, blockMaterial);
-      meshCache.set(id, mesh);
-      return mesh.clone();
-    }
-    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const h = isoHeight(id);
+    const geo = new THREE.BoxGeometry(1, h, 1);
+    geo.translate(0, (h - 1) / 2, 0);
+    const bid = def.block;
+    const meta = iconMeta(bid);
     const uv = geo.attributes.uv;
+    // BoxGeometry の面順: +x, -x, +y, -y, +z, -z → faceTile の面番号
+    const FACE_MAP = [1, 0, 3, 2, 5, 4];
     for (let f = 0; f < 6; f++) {
-      const tile = f === 2 ? tiles[0] : f === 3 ? tiles[1] : (f >= 4 ? tiles[3] ?? tiles[2] : tiles[2]);
-      const [u0, v0, u1, v1] = tileUV(tile);
+      const [u0, v0, u1, v1] = tileUV(faceTile(bid, FACE_MAP[f], meta));
+      const side = f !== 2 && f !== 3;
+      const vTop = side ? v0 + (v1 - v0) * h : v1;
       const base = f * 4;
-      uv.setXY(base, u0, v1); uv.setXY(base + 1, u1, v1); uv.setXY(base + 2, u0, v0); uv.setXY(base + 3, u1, v0);
+      uv.setXY(base, u0, vTop); uv.setXY(base + 1, u1, vTop); uv.setXY(base + 2, u0, v0); uv.setXY(base + 3, u1, v0);
     }
     mesh = new THREE.Mesh(geo, blockMaterial);
   } else {
-    mesh = new THREE.Mesh(buildPixelGeometry(id), spriteMaterial);
+    mesh = new THREE.Mesh(buildPixelGeometry(spritePixels(id)), spriteMaterial);
   }
   meshCache.set(id, mesh);
   return mesh.clone();
 }
 
 // ドット絵を 1 ピクセル = 1 個の薄い立方体として押し出す
-export function buildPixelGeometry(id, depth = 0.6) {
+export function buildPixelGeometry(pixel, depth = 0.6) {
   const pos = [], nor = [], col = [], idx = [];
-  const s = 1 / TILE_PX;
+  const s = 1 / 16;
   const d = s * depth;
   const faces = [
-    { dir: [1, 0, 0], corners: [[1, 1, 1], [1, 0, 1], [1, 1, 0], [1, 0, 0]] },
-    { dir: [-1, 0, 0], corners: [[0, 1, 0], [0, 0, 0], [0, 1, 1], [0, 0, 1]] },
-    { dir: [0, 1, 0], corners: [[0, 1, 1], [1, 1, 1], [0, 1, 0], [1, 1, 0]] },
-    { dir: [0, -1, 0], corners: [[1, 0, 1], [0, 0, 1], [1, 0, 0], [0, 0, 0]] },
-    { dir: [0, 0, 1], corners: [[0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]] },
-    { dir: [0, 0, -1], corners: [[1, 0, 0], [0, 0, 0], [1, 1, 0], [0, 1, 0]] },
+    { dir: [1, 0, 0], corners: [[1, 1, 1], [1, 0, 1], [1, 1, 0], [1, 0, 0]], nb: [1, 0] },
+    { dir: [-1, 0, 0], corners: [[0, 1, 0], [0, 0, 0], [0, 1, 1], [0, 0, 1]], nb: [-1, 0] },
+    { dir: [0, 1, 0], corners: [[0, 1, 1], [1, 1, 1], [0, 1, 0], [1, 1, 0]], nb: [0, -1] },
+    { dir: [0, -1, 0], corners: [[1, 0, 1], [0, 0, 1], [1, 0, 0], [0, 0, 0]], nb: [0, 1] },
+    { dir: [0, 0, 1], corners: [[0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]], nb: null },
+    { dir: [0, 0, -1], corners: [[1, 0, 0], [0, 0, 0], [1, 1, 0], [0, 1, 0]], nb: null },
   ];
   const c = new THREE.Color();
-  for (let y = 0; y < TILE_PX; y++) {
-    for (let x = 0; x < TILE_PX; x++) {
-      const color = itemPixel(id, x, y);
+  const at = (x, y) => (x < 0 || y < 0 || x > 15 || y > 15 ? null : pixel(x, y));
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const color = pixel(x, y);
       if (color === null) continue;
       c.setHex(color);
       const px = x * s - 0.5;
-      const py = (TILE_PX - 1 - y) * s - 0.5;
+      const py = (15 - y) * s - 0.5;
       for (const face of faces) {
+        if (face.nb && at(x + face.nb[0], y + face.nb[1]) !== null) continue; // 内側の面は省く
         const base = pos.length / 3;
         for (const k of face.corners) {
           pos.push(px + k[0] * s, py + k[1] * s, (k[2] - 0.5) * d);
@@ -100,11 +94,12 @@ export class DropManager {
     this.time = 0;
   }
 
-  spawn(id, count, x, y, z, velocity = null) {
+  spawn(id, count, x, y, z, velocity = null, damage = 0) {
+    if (!ITEMS[id] || count <= 0) return null;
     const mesh = buildItemMesh(id);
-    mesh.scale.setScalar(0.25);
+    mesh.scale.setScalar(iconKind(id) === 'iso' ? 0.25 : 0.35);
     const item = {
-      id, count, mesh,
+      id, count, damage, mesh,
       position: new THREE.Vector3(x, y, z),
       velocity: velocity ?? new THREE.Vector3((Math.random() - 0.5) * 3, 3 + Math.random() * 2, (Math.random() - 0.5) * 3),
       width: 0.25, height: 0.25, onGround: false, age: 0,
@@ -114,9 +109,8 @@ export class DropManager {
     return item;
   }
 
-  // プレイヤーの死亡時など、複数をまとめて落とす
   spawnStacks(stacks, x, y, z) {
-    for (const s of stacks) this.spawn(s.id, s.count, x, y, z);
+    for (const s of stacks) this.spawn(s.id, s.count, x, y, z, null, s.damage ?? 0);
   }
 
   update(dt, player, inventory, onPickup) {
@@ -124,23 +118,19 @@ export class DropManager {
     for (let i = this.items.length - 1; i >= 0; i--) {
       const it = this.items[i];
       it.age += dt;
-      if (feetInWater(this.world, it)) {
-        it.velocity.y += (1.5 - it.velocity.y) * Math.min(1, dt * 4);
-      } else {
-        it.velocity.y -= GRAVITY * dt;
-      }
+      if (feetInWater(this.world, it)) it.velocity.y += (1.5 - it.velocity.y) * Math.min(1, dt * 4);
+      else it.velocity.y -= GRAVITY * dt;
       if (it.onGround) { it.velocity.x *= Math.exp(-dt * 8); it.velocity.z *= Math.exp(-dt * 8); }
       moveEntity(this.world, it, dt);
-      it.mesh.position.set(it.position.x, it.position.y + 0.12 + Math.sin(this.time * 2 + i) * 0.05, it.position.z);
+      it.mesh.position.set(it.position.x, it.position.y + 0.15 + Math.sin(this.time * 2 + i) * 0.05, it.position.z);
       it.mesh.rotation.y = this.time * 1.5 + i;
 
-      // 拾う
       if (it.age > PICKUP_DELAY && player && !player.dead) {
         const dx = it.position.x - player.position.x;
         const dy = it.position.y - player.position.y;
         const dz = it.position.z - player.position.z;
         if (dx * dx + dz * dz < 1.2 * 1.2 && dy > -0.8 && dy < 2) {
-          const rest = inventory.add(it.id, it.count);
+          const rest = inventory.add(it.id, it.count, it.damage);
           if (rest < it.count) onPickup?.(it.id, it.count - rest);
           if (rest === 0) { this.remove(i); continue; }
           it.count = rest;
@@ -162,12 +152,13 @@ export class DropManager {
   }
 
   serialize() {
-    return this.items.map((it) => [it.id, it.count, +it.position.x.toFixed(2), +it.position.y.toFixed(2), +it.position.z.toFixed(2)]);
+    return this.items.map((it) => [it.id, it.count, +it.position.x.toFixed(2), +it.position.y.toFixed(2), +it.position.z.toFixed(2), it.damage || 0]);
   }
 
   load(list) {
-    for (const [id, count, x, y, z] of list ?? []) {
-      if (ITEMS[id]) this.spawn(id, count, x, y, z, new THREE.Vector3());
+    for (const [rawId, count, x, y, z, damage] of list ?? []) {
+      const id = normalizeItemId(rawId);
+      if (id) this.spawn(id, count, x, y, z, new THREE.Vector3(), damage ?? 0);
     }
   }
 }

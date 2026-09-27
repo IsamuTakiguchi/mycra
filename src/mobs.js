@@ -8,12 +8,12 @@ const GRAVITY = 28;
 
 export const MOB_TYPES = {
   pig: { name: 'ブタ', hostile: false, health: 10, width: 0.9, height: 0.9, speed: 1.2, drops: [['porkchop', 1, 3]] },
-  cow: { name: 'ウシ', hostile: false, health: 10, width: 0.9, height: 1.4, speed: 1.1, drops: [['beef', 1, 3]] },
-  sheep: { name: 'ヒツジ', hostile: false, health: 8, width: 0.9, height: 1.3, speed: 1.1, drops: [['mutton', 1, 2], ['wool', 1, 1]] },
+  cow: { name: 'ウシ', hostile: false, health: 10, width: 0.9, height: 1.4, speed: 1.1, drops: [['beef', 1, 3], ['leather', 0, 2]] },
+  sheep: { name: 'ヒツジ', hostile: false, health: 8, width: 0.9, height: 1.3, speed: 1.1, drops: [['mutton', 1, 2], ['white_wool', 1, 1]] },
   chicken: { name: 'ニワトリ', hostile: false, health: 4, width: 0.4, height: 0.7, speed: 1.0, drops: [['chicken', 1, 1], ['feather', 0, 2]] },
-  zombie: { name: 'ゾンビ', hostile: true, health: 20, width: 0.6, height: 1.95, speed: 2.3, attack: 3, drops: [] },
-  skeleton: { name: 'スケルトン', hostile: true, health: 20, width: 0.6, height: 1.99, speed: 2.0, attack: 2, drops: [] },
-  creeper: { name: 'クリーパー', hostile: true, health: 20, width: 0.6, height: 1.7, speed: 2.0, attack: 0, drops: [] },
+  zombie: { name: 'ゾンビ', hostile: true, health: 20, width: 0.6, height: 1.95, speed: 2.3, attack: 3, drops: [['rotten_flesh', 0, 2]] },
+  skeleton: { name: 'スケルトン', hostile: true, health: 20, width: 0.6, height: 1.99, speed: 2.0, attack: 2, drops: [['bone', 0, 2], ['arrow', 0, 2]] },
+  creeper: { name: 'クリーパー', hostile: true, health: 20, width: 0.6, height: 1.7, speed: 2.0, attack: 0, drops: [['gunpowder', 0, 2]] },
 };
 
 const HOSTILE_CAP = { peaceful: 0, easy: 8, normal: 12, hard: 18 };
@@ -28,6 +28,7 @@ export class Mob {
     this.velocity = new THREE.Vector3();
     this.width = def.width;
     this.height = def.height;
+    this.stepHeight = 0.6;
     this.health = def.health;
     this.onGround = false;
     this.hitWall = false;
@@ -161,8 +162,8 @@ export class MobManager {
       for (let i = this.mobs.length - 1; i >= 0; i--) {
         if (this.mobs[i].def.hostile) { this.scene.remove(this.mobs[i].group); this.mobs.splice(i, 1); }
       }
-      for (const a of this.arrows) this.scene.remove(a.mesh);
-      this.arrows = [];
+      for (const a of this.arrows) if (a.owner === 'mob') this.scene.remove(a.mesh);
+      this.arrows = this.arrows.filter((a) => a.owner !== 'mob');
     }
     if (this.spawnTimer > 1.5) { this.spawnTimer = 0; this.trySpawn(player, daylight); }
 
@@ -172,7 +173,7 @@ export class MobManager {
         m.deathTimer -= dt;
         m.group.rotation.z = Math.min(Math.PI / 2, m.group.rotation.z + dt * 6);
         if (m.deathTimer <= 0) {
-          for (const [item, min, max] of m.def.drops) {
+          if (!m.noDrops) for (const [item, min, max] of m.def.drops) {
             const n = min + Math.floor(Math.random() * (max - min + 1));
             if (n > 0) ctx.drops.spawn(item, n, m.position.x, m.position.y + 0.5, m.position.z);
           }
@@ -189,7 +190,7 @@ export class MobManager {
       if (m.position.y < -10) { this.scene.remove(m.group); this.mobs.splice(i, 1); }
     }
 
-    this.updateArrows(dt, player);
+    this.updateArrows(dt, player, ctx);
   }
 
   updateMob(m, dt, player, daylight, ctx) {
@@ -298,24 +299,21 @@ export class MobManager {
   }
 
   explode(m, player, ctx) {
-    const cx = m.position.x, cy = m.position.y + 0.5, cz = m.position.z;
-    const drops = this.world.explode(cx, cy, cz, 3);
-    for (const d of drops) ctx.drops.spawn(d.item, 1, d.x, d.y, d.z);
-    const dist = player.position.distanceTo(new THREE.Vector3(cx, cy, cz));
-    if (dist < 6) {
-      const dmg = Math.round(Math.max(1, 24 * (1 - dist / 6)));
-      const dx = player.position.x - cx, dz = player.position.z - cz;
-      const l = Math.hypot(dx, dz) || 1;
-      if (player.damage(dmg, { x: (dx / l) * 8, z: (dz / l) * 8 }, true)) ctx.onPlayerHurt?.();
-    }
-    for (const other of this.mobs) {
-      if (other === m || other.dead) continue;
-      const d2 = other.position.distanceTo(m.position);
-      if (d2 < 5) other.damage(Math.round(16 * (1 - d2 / 5)), m.position);
-    }
-    ctx.onExplosion?.(cx, cy, cz);
+    ctx.explode?.(m.position.x, m.position.y + 0.5, m.position.z, 3, m);
     m.dead = true;
     m.deathTimer = 0;
+    m.noDrops = true;
+  }
+
+  // 爆発のダメージをモブに与える
+  blast(cx, cy, cz, power, source = null) {
+    const center = new THREE.Vector3(cx, cy, cz);
+    const r = power * 2;
+    for (const other of this.mobs) {
+      if (other === source || other.dead) continue;
+      const d = other.position.distanceTo(center);
+      if (d < r) { other.hurtTimer = 0; other.damage(Math.round(power * 5 * (1 - d / r)) + 1, center); }
+    }
   }
 
   shootArrow(m, player) {
@@ -325,35 +323,57 @@ export class MobManager {
     const dist = d.length();
     const v = d.normalize().multiplyScalar(18);
     v.y += dist * 0.45; // 山なりに
-    const mesh = new THREE.Mesh(this.arrowGeo, this.arrowMat);
-    this.scene.add(mesh);
-    this.arrows.push({ position: from, velocity: v, mesh, age: 0, stuck: false });
+    this.addArrow(from, v, 'mob', 3);
   }
 
-  updateArrows(dt, player) {
+  addArrow(from, velocity, owner, damage, pickup = false) {
+    const mesh = new THREE.Mesh(this.arrowGeo, this.arrowMat);
+    mesh.position.copy(from);
+    this.scene.add(mesh);
+    this.arrows.push({ position: from.clone(), velocity: velocity.clone(), mesh, age: 0, stuck: false, owner, damage, pickup });
+  }
+
+  updateArrows(dt, player, ctx) {
     for (let i = this.arrows.length - 1; i >= 0; i--) {
       const a = this.arrows[i];
       a.age += dt;
+      let remove = false;
       if (!a.stuck) {
-        a.velocity.y -= 20 * dt;
-        const next = a.position.clone().addScaledVector(a.velocity, dt);
-        if (isSolid(this.world.get(Math.floor(next.x), Math.floor(next.y), Math.floor(next.z)))) {
-          a.stuck = true;
-        } else {
+        // 速い矢がすり抜けないよう、0.4 ブロックずつ進めて判定する
+        const steps = Math.max(1, Math.ceil((a.velocity.length() * dt) / 0.4));
+        const h = dt / steps;
+        for (let k = 0; k < steps && !a.stuck && !remove; k++) {
+          a.velocity.y -= 20 * h;
+          const next = a.position.clone().addScaledVector(a.velocity, h);
+          if (isSolid(this.world.get(Math.floor(next.x), Math.floor(next.y), Math.floor(next.z)))) {
+            a.stuck = true;
+            // プレイヤーが射った矢は拾えるようにアイテムとして落とす
+            if (a.owner === 'player' && a.pickup) ctx?.drops?.spawn('arrow', 1, a.position.x, a.position.y, a.position.z, new THREE.Vector3());
+            if (a.owner === 'player') remove = true;
+            break;
+          }
           a.position.copy(next);
           const hitbox = { position: a.position.clone().sub(new THREE.Vector3(0.1, 0.1, 0.1)), width: 0.2, height: 0.2 };
-          if (!player.dead && !player.ignoredByMobs && intersectsEntity(hitbox, player)) {
-            const l = Math.hypot(a.velocity.x, a.velocity.z) || 1;
-            if (player.damage(3, { x: (a.velocity.x / l) * 3, z: (a.velocity.z / l) * 3 }, true)) this.onPlayerHurt?.();
-            this.scene.remove(a.mesh);
-            this.arrows.splice(i, 1);
-            continue;
+          if (a.owner === 'mob') {
+            if (!player.dead && !player.ignoredByMobs && intersectsEntity(hitbox, player)) {
+              const l = Math.hypot(a.velocity.x, a.velocity.z) || 1;
+              if (player.damage(a.damage, { x: (a.velocity.x / l) * 3, z: (a.velocity.z / l) * 3 }, true)) this.onPlayerHurt?.();
+              remove = true;
+            }
+          } else {
+            const target = this.mobs.find((m) => !m.dead && intersectsEntity(hitbox, m));
+            if (target) {
+              const speed = a.velocity.length();
+              target.hurtTimer = 0;
+              target.damage(Math.ceil(a.damage * Math.min(1, speed / 50) + 1), a.position.clone().sub(a.velocity.clone().normalize()));
+              remove = true;
+            }
           }
         }
         a.mesh.position.copy(a.position);
         a.mesh.lookAt(a.position.clone().add(a.velocity));
       }
-      if (a.age > 8 || a.position.y < -10) { this.scene.remove(a.mesh); this.arrows.splice(i, 1); }
+      if (remove || a.age > 8 || a.position.y < -10) { this.scene.remove(a.mesh); this.arrows.splice(i, 1); }
     }
   }
 

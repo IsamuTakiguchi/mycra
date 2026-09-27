@@ -1,7 +1,11 @@
-import { BLOCK } from './blocks.js';
+import { BLOCK, BLOCKS } from './blocks.js';
+import { shapeBoxes, boundsOf } from './shapes.js';
+import { rayBox } from './physics.js';
 
-// ボクセル DDA (Amanatides & Woo)。視線が最初に当たるブロックとその面の法線を返す
-export function raycastVoxel(world, origin, dir, maxDist) {
+// ボクセル DDA (Amanatides & Woo)。視線が最初に当たるブロックとその面の法線を返す。
+// 立方体でないブロック (ハーフブロック、ドア、草など) は選択ボックスとの交差で判定する。
+// opts.fluids: 水も対象にする (バケツ用)
+export function raycastVoxel(world, origin, dir, maxDist, opts = {}) {
   let x = Math.floor(origin.x);
   let y = Math.floor(origin.y);
   let z = Math.floor(origin.z);
@@ -24,8 +28,21 @@ export function raycastVoxel(world, origin, dir, maxDist) {
 
   while (t <= maxDist) {
     const id = world.get(x, y, z);
-    if (id !== BLOCK.AIR && id !== BLOCK.WATER) {
-      return { x, y, z, id, normal, distance: t };
+    if (id !== BLOCK.AIR && (id !== BLOCK.WATER || opts.fluids)) {
+      const def = BLOCKS[id];
+      if (def.shape === 'cube' || id === BLOCK.WATER) {
+        return finish({ x, y, z, id, normal, distance: t, bounds: [0, 0, 0, 1, 1, 1] }, origin, dir);
+      }
+      const meta = world.getMeta(x, y, z);
+      const list = shapeBoxes(world, x, y, z, id, meta, 'select');
+      let best = null;
+      for (const b of list) {
+        const r = rayBox(origin, dir, x + b[0], y + b[1], z + b[2], x + b[3], y + Math.min(1, b[4]), z + b[5]);
+        if (r && (!best || r.t < best.t)) best = r;
+      }
+      if (best && best.t <= maxDist) {
+        return finish({ x, y, z, id, normal: best.normal, distance: best.t, bounds: boundsOf(list) }, origin, dir);
+      }
     }
     if (tMaxX < tMaxY && tMaxX < tMaxZ) {
       x += stepX; t = tMaxX; tMaxX += tDeltaX; normal = [-stepX, 0, 0];
@@ -36,4 +53,14 @@ export function raycastVoxel(world, origin, dir, maxDist) {
     }
   }
   return null;
+}
+
+// 当たった点のブロック内での位置 (ハーフブロックの上下判定などに使う)
+function finish(hit, origin, dir) {
+  const px = origin.x + dir.x * hit.distance;
+  const py = origin.y + dir.y * hit.distance;
+  const pz = origin.z + dir.z * hit.distance;
+  hit.point = [px, py, pz];
+  hit.frac = [px - hit.x, py - hit.y, pz - hit.z];
+  return hit;
 }
