@@ -16,7 +16,7 @@ export const MOB_TYPES = {
   creeper: { name: 'クリーパー', hostile: true, health: 20, width: 0.6, height: 1.7, speed: 2.0, attack: 0, drops: [] },
 };
 
-const HOSTILE_CAP = 12;
+const HOSTILE_CAP = { peaceful: 0, easy: 8, normal: 12, hard: 18 };
 const PASSIVE_CAP = 24;
 
 export class Mob {
@@ -74,6 +74,7 @@ export class MobManager {
     this.arrows = [];
     this.spawnTimer = 0;
     this.time = 0;
+    this.difficulty = 'normal';
     this.arrowGeo = new THREE.BoxGeometry(0.06, 0.06, 0.6);
     this.arrowMat = new THREE.MeshLambertMaterial({ color: 0x8a6a3a });
   }
@@ -127,7 +128,7 @@ export class MobManager {
       if (this.world.get(x, y, z) !== BLOCK.AIR || this.world.get(x, y + 1, z) !== BLOCK.AIR) continue;
       const light = this.world.lightLevel(x, y, z, daylight);
       if (light <= 7) {
-        if (hostile >= HOSTILE_CAP) continue;
+        if (hostile >= HOSTILE_CAP[this.difficulty]) continue;
         const r = Math.random();
         const type = r < 0.5 ? 'zombie' : r < 0.8 ? 'skeleton' : 'creeper';
         this.add(type, x + 0.5, y + 0.01, z + 0.5);
@@ -155,6 +156,14 @@ export class MobManager {
   update(dt, player, daylight, ctx) {
     this.time += dt;
     this.spawnTimer += dt;
+    // ピースフルでは敵が消える
+    if (this.difficulty === 'peaceful') {
+      for (let i = this.mobs.length - 1; i >= 0; i--) {
+        if (this.mobs[i].def.hostile) { this.scene.remove(this.mobs[i].group); this.mobs.splice(i, 1); }
+      }
+      for (const a of this.arrows) this.scene.remove(a.mesh);
+      this.arrows = [];
+    }
     if (this.spawnTimer > 1.5) { this.spawnTimer = 0; this.trySpawn(player, daylight); }
 
     for (let i = this.mobs.length - 1; i >= 0; i--) {
@@ -194,7 +203,7 @@ export class MobManager {
     let moveX = 0, moveZ = 0, speed = def.speed;
     let wantJump = false;
 
-    if (def.hostile && !player.dead && dist < 20 && !player.creative) {
+    if (def.hostile && !player.dead && dist < 20 && !player.ignoredByMobs) {
       // 追いかける
       const dirX = toPlayer.x / (dist || 1), dirZ = toPlayer.z / (dist || 1);
       if (m.type === 'skeleton') {
@@ -224,7 +233,7 @@ export class MobManager {
         if (dist < 1.6 && m.attackTimer <= 0 && Math.abs(toPlayer.y) < 2) {
           m.attackTimer = 1.0;
           const kb = { x: dirX * 5, z: dirZ * 5 };
-          if (player.damage(def.attack, kb)) ctx.onPlayerHurt?.();
+          if (player.damage(def.attack, kb, true)) ctx.onPlayerHurt?.();
         }
       }
     } else {
@@ -297,7 +306,7 @@ export class MobManager {
       const dmg = Math.round(Math.max(1, 24 * (1 - dist / 6)));
       const dx = player.position.x - cx, dz = player.position.z - cz;
       const l = Math.hypot(dx, dz) || 1;
-      if (player.damage(dmg, { x: (dx / l) * 8, z: (dz / l) * 8 })) ctx.onPlayerHurt?.();
+      if (player.damage(dmg, { x: (dx / l) * 8, z: (dz / l) * 8 }, true)) ctx.onPlayerHurt?.();
     }
     for (const other of this.mobs) {
       if (other === m || other.dead) continue;
@@ -333,9 +342,9 @@ export class MobManager {
         } else {
           a.position.copy(next);
           const hitbox = { position: a.position.clone().sub(new THREE.Vector3(0.1, 0.1, 0.1)), width: 0.2, height: 0.2 };
-          if (!player.dead && intersectsEntity(hitbox, player)) {
+          if (!player.dead && !player.ignoredByMobs && intersectsEntity(hitbox, player)) {
             const l = Math.hypot(a.velocity.x, a.velocity.z) || 1;
-            if (player.damage(3, { x: (a.velocity.x / l) * 3, z: (a.velocity.z / l) * 3 })) this.onPlayerHurt?.();
+            if (player.damage(3, { x: (a.velocity.x / l) * 3, z: (a.velocity.z / l) * 3 }, true)) this.onPlayerHurt?.();
             this.scene.remove(a.mesh);
             this.arrows.splice(i, 1);
             continue;

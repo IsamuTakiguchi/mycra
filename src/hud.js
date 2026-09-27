@@ -87,12 +87,12 @@ export class HUD {
   }
 
   updateStats(player) {
-    const creative = player.creative;
+    const noStats = !player.hasStats;
     if (this.lastMode !== player.gameMode) {
       this.lastMode = player.gameMode;
-      this.els.stats.style.display = creative ? 'none' : '';
+      this.els.stats.style.display = noStats ? 'none' : '';
     }
-    if (creative) return;
+    if (noStats) return;
     const hp = Math.round(player.health);
     if (hp !== this.lastHealth) {
       this.lastHealth = hp;

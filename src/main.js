@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { World } from './world.js';
-import { Player } from './player.js';
+import { Player, GAME_MODES, DIFFICULTIES } from './player.js';
 import { raycastVoxel } from './raycast.js';
 import { BLOCK, BLOCKS, isSolid, createCrackTexture } from './blocks.js';
 import { ITEMS, itemName } from './items.js';
@@ -130,7 +130,7 @@ function save(showToast = false) {
     player: {
       x: player.position.x, y: player.position.y, z: player.position.z,
       yaw: player.yaw, pitch: player.pitch, flying: player.flying, gameMode: player.gameMode,
-      health: player.health, hunger: player.hunger, spawnPoint: player.spawnPoint,
+      difficulty: player.difficulty, health: player.health, hunger: player.hunger, spawnPoint: player.spawnPoint,
     },
     inventory: inventory.serialize(),
     timeOfDay,
@@ -161,11 +161,13 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
   scene.add(world.group);
 
   player = new Player(world, camera);
-  player.gameMode = saveData?.player?.gameMode ?? gameMode;
+  player.setGameMode(GAME_MODES[saveData?.player?.gameMode] ? saveData.player.gameMode : gameMode);
+  player.difficulty = DIFFICULTIES[saveData?.player?.difficulty] ? saveData.player.difficulty : 'normal';
   inventory = new Inventory();
   drops = new DropManager(world, scene);
   mobs = new MobManager(world, scene);
   mobs.onPlayerHurt = () => hud.flashDamage();
+  mobs.difficulty = player.difficulty;
   spawnRand = mulberry32(seed + 77);
   if (touch) touch.player = player;
   screen.inv = inventory;
@@ -175,7 +177,7 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
     player.position.set(p.x, p.y, p.z);
     player.yaw = p.yaw;
     player.pitch = p.pitch;
-    player.flying = !!p.flying && player.creative;
+    player.flying = player.spectator || (!!p.flying && player.creative);
     if (p.health !== undefined) player.health = p.health;
     if (p.hunger !== undefined) player.hunger = p.hunger;
     player.spawnPoint = p.spawnPoint ?? world.findSpawn();
@@ -191,7 +193,7 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
   player.syncCamera();
   hud.renderHotbar(inventory);
   hand.setItem(inventory.selectedItem?.id ?? null);
-  updateModeButton();
+  updateModeUI();
 }
 
 function newWorld() {
@@ -201,8 +203,38 @@ function newWorld() {
   hud.toast(`新しい世界を生成しました (seed: ${seed})`);
 }
 
-function updateModeButton() {
-  $('gamemode').textContent = `ゲームモード: ${player.creative ? 'クリエイティブ' : 'サバイバル'}`;
+function updateModeUI() {
+  for (const el of document.querySelectorAll('[data-mode]')) el.classList.toggle('on', el.dataset.mode === player.gameMode);
+  for (const el of document.querySelectorAll('[data-diff]')) el.classList.toggle('on', el.dataset.diff === player.difficulty);
+  $('mode-desc').textContent = MODE_DESC[player.gameMode];
+  $('diff-desc').textContent = DIFF_DESC[player.difficulty];
+}
+
+const MODE_DESC = {
+  survival: '素材を集め、道具を作り、敵と戦いながら生き抜く。体力と満腹度がある。',
+  creative: 'すべてのアイテムが使え、空を飛べて、ブロックを一瞬で壊せる。',
+  adventure: 'ブロックの破壊と設置ができない。探索と戦闘を楽しむモード。',
+  spectator: '壁をすり抜けて自由に飛び回れる。何にも触れず、モブにも狙われない。',
+};
+const DIFF_DESC = {
+  peaceful: '敵がわかず、満腹度が減らず、体力が回復し続ける。',
+  easy: '敵のダメージが半分。飢えても体力 5 個分までしか減らない。',
+  normal: '標準。飢えると体力が半個分まで減る。',
+  hard: '敵のダメージが 1.5 倍、敵の数が増え、飢えると死ぬ。',
+};
+
+function setGameMode(mode) {
+  player.setGameMode(mode);
+  touch.setFlying(player.flying);
+  updateModeUI();
+  hud.toast(`ゲームモード: ${GAME_MODES[mode]}`);
+}
+
+function setDifficulty(diff) {
+  player.difficulty = diff;
+  mobs.difficulty = diff;
+  updateModeUI();
+  hud.toast(`難易度: ${DIFFICULTIES[diff]}`);
 }
 
 // ---------- 入力 ----------
@@ -280,7 +312,7 @@ document.addEventListener('keydown', (e) => {
       if (now - lastSpaceTap < 300) { toggleFly(); lastSpaceTap = 0; } else lastSpaceTap = now;
       break;
     case 'KeyW':
-      if (now - lastForwardTap < 300 && (player.creative || player.hunger > 6)) player.sprinting = true;
+      if (now - lastForwardTap < 300 && (!player.hasStats || player.hunger > 6)) player.sprinting = true;
       lastForwardTap = now;
       break;
     case 'Escape':
@@ -312,19 +344,15 @@ document.addEventListener('mouseup', (e) => {
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function toggleFly() {
-  if (!player.creative) return;
+  if (!player.creative || player.spectator) return;
   const on = player.setFlying(!player.flying);
   touch.setFlying(on);
 }
 
 startBtn.addEventListener('click', start);
 $('save').addEventListener('click', () => save(true));
-$('gamemode').addEventListener('click', () => {
-  player.gameMode = player.creative ? 'survival' : 'creative';
-  if (!player.creative) player.setFlying(false);
-  updateModeButton();
-  hud.toast(player.creative ? 'クリエイティブモード' : 'サバイバルモード');
-});
+for (const el of document.querySelectorAll('[data-mode]')) el.addEventListener('click', () => setGameMode(el.dataset.mode));
+for (const el of document.querySelectorAll('[data-diff]')) el.addEventListener('click', () => setDifficulty(el.dataset.diff));
 $('newworld').addEventListener('click', () => {
   if (confirm('現在の世界を破棄して新しい世界を生成しますか？')) newWorld();
 });
@@ -386,7 +414,7 @@ screen = new InventoryScreen($('inv-screen'), null, {
 });
 
 function openInventory() {
-  screen.show(player.creative ? 'creative' : 'survival');
+  screen.show(player.creative || player.spectator ? 'creative' : 'survival');
   player.keys.clear();
   stopMining();
   useHeld = false;
@@ -481,7 +509,7 @@ function mobTarget() {
 
 // 左クリック: モブがいれば攻撃 (true を返す)
 function attack() {
-  if (player.attackCooldown > 0) return false;
+  if (player.spectator || player.attackCooldown > 0) return false;
   const mob = mobTarget();
   if (!mob) return false;
   hand.swing();
@@ -494,6 +522,10 @@ function attack() {
 }
 
 function startMining() {
+  if (!player.canBuild) {
+    if (player.gameMode === 'adventure') hud.toast('アドベンチャーモードではブロックを壊せません');
+    return;
+  }
   mining.active = true;
 }
 
@@ -548,7 +580,7 @@ function breakBlockAt(hit, withDrops) {
   const def = BLOCKS[hit.id];
   world.set(hit.x, hit.y, hit.z, BLOCK.AIR);
   hand.swing();
-  if (!withDrops || player.creative) return;
+  if (!withDrops || !player.consumesItems) return;
   if (def.drop) drops.spawn(def.drop, 1, hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
   if (def.dropChance) {
     for (const [id, p] of Object.entries(def.dropChance)) if (Math.random() < p) drops.spawn(id, 1, hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
@@ -560,6 +592,7 @@ function breakBlockAt(hit, withDrops) {
 
 // 右クリック / タップ: 使う・置く・食べる
 function use(instantEat = false) {
+  if (player.spectator) return;
   const item = inventory.selectedItem;
   const def = item ? ITEMS[item.id] : null;
   const hit = blockTarget();
@@ -570,12 +603,14 @@ function use(instantEat = false) {
     return;
   }
   if (def?.food) {
-    if (player.hunger >= 20 && !player.creative) return;
+    if (player.hunger >= 20 && player.hasStats) return;
     if (instantEat) eatNow();
     return; // デスクトップでは長押しで食べる (updateUse)
   }
-  if (def?.block !== undefined) placeBlock(hit, def.block);
-  else hand.swing();
+  if (def?.block !== undefined) {
+    if (!player.canBuild) { hud.toast('アドベンチャーモードではブロックを置けません'); return; }
+    placeBlock(hit, def.block);
+  } else hand.swing();
 }
 
 function eatNow() {
@@ -583,7 +618,7 @@ function eatNow() {
   const def = item ? ITEMS[item.id] : null;
   if (!def?.food) return;
   player.eat(def.food);
-  if (!player.creative) inventory.consumeSelected(1);
+  if (player.consumesItems) inventory.consumeSelected(1);
   hud.renderHotbar(inventory);
   hand.setItem(inventory.selectedItem?.id ?? null);
   hand.swing();
@@ -611,7 +646,7 @@ function placeBlock(hit, id) {
     if (!supported) return;
   }
   world.set(x, y, z, id);
-  if (!player.creative) {
+  if (player.consumesItems) {
     inventory.consumeSelected(1);
     hud.renderHotbar(inventory);
     hand.setItem(inventory.selectedItem?.id ?? null);
@@ -624,7 +659,7 @@ function pickBlock() {
   if (!hit) return;
   const itemId = BLOCKS[hit.id].item;
   if (!itemId) return;
-  if (player.creative) inventory.pickBlock(itemId);
+  if (player.creative || player.spectator) inventory.pickBlock(itemId);
   else {
     for (let i = 0; i < HOTBAR_SIZE; i++) if (inventory.slots[i]?.id === itemId) { inventory.selected = i; break; }
   }
@@ -638,7 +673,7 @@ function updateUse(dt) {
   const item = inventory.selectedItem;
   const def = item ? ITEMS[item.id] : null;
   if (def?.food) {
-    if (player.hunger >= 20 && !player.creative) return;
+    if (player.hunger >= 20 && player.hasStats) return;
     eatTimer += dt;
     if (Math.floor(eatTimer * 6) !== Math.floor((eatTimer - dt) * 6)) hand.swing();
     if (eatTimer >= 1.6) eatNow();
@@ -673,7 +708,7 @@ function updateCamera() {
   camera.updateProjectionMatrix();
   if (!thirdPerson) {
     playerModel.group.visible = false;
-    hand.visible = true;
+    hand.visible = !player.spectator;
     return;
   }
   hand.visible = false;
@@ -714,7 +749,7 @@ function loop(now) {
     onPlayerHurt: () => hud.flashDamage(),
     onExplosion: () => hud.toast('クリーパーが爆発した！'),
   });
-  drops.update(dt, active ? player : null, inventory, () => { hud.renderHotbar(inventory); if (!hand.item && inventory.selectedItem) hand.setItem(inventory.selectedItem.id); });
+  drops.update(dt, active && !player.spectator ? player : null, inventory, () => { hud.renderHotbar(inventory); if (!hand.item && inventory.selectedItem) hand.setItem(inventory.selectedItem.id); });
   if (player.dead && deathEl.classList.contains('hidden')) onDeath();
 
   updateCamera();
@@ -756,7 +791,7 @@ function loop(now) {
         `FPS ${fps}\nXYZ ${p.x.toFixed(2)} / ${p.y.toFixed(2)} / ${p.z.toFixed(2)}\n` +
         `Block ${bx} ${by} ${bz}\n時刻 ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}\n` +
         `明るさ 空 ${world.lighting.skyAt(bx, by, bz)} 光源 ${world.lighting.blockAt(bx, by, bz)}\n` +
-        `モード ${player.gameMode}${player.flying ? ' 飛行' : ''}${player.sneaking ? ' スニーク' : ''}${player.sprinting ? ' ダッシュ' : ''}\n` +
+        `モード ${GAME_MODES[player.gameMode]} / ${DIFFICULTIES[player.difficulty]}${player.flying ? ' 飛行' : ''}${player.sneaking ? ' スニーク' : ''}${player.sprinting ? ' ダッシュ' : ''}\n` +
         `モブ ${mobs.mobs.length}  ドロップ ${drops.items.length}\n` +
         `手持ち ${inventory.selectedItem ? itemName(inventory.selectedItem.id) : 'なし'}` +
         (hit ? `\n注視 ${BLOCKS[hit.id].name} (${hit.x} ${hit.y} ${hit.z})` : '') +
@@ -776,7 +811,7 @@ function onDeath() {
   stopMining();
   useHeld = false;
   touch.setEnabled(false);
-  if (!player.creative) {
+  if (player.hasStats) {
     const all = inventory.takeAll();
     drops.spawnStacks(all, player.position.x, player.position.y + 0.5, player.position.z);
     hud.renderHotbar(inventory);
@@ -812,6 +847,6 @@ window.__mycra = {
   set touchAim(v) { touchAim = v; },
   set timeOfDay(v) { timeOfDay = v; },
   blockTarget, mobTarget, attack, startMining, stopMining, use, placeBlock, pickBlock, save, selectSlot,
-  startTouchPlay, showMenu, openInventory, closeInventory, breakBlockAt, eatNow,
+  startTouchPlay, showMenu, openInventory, closeInventory, breakBlockAt, eatNow, setGameMode, setDifficulty,
   set thirdPerson(v) { thirdPerson = v; },
 };

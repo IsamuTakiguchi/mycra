@@ -97,8 +97,29 @@
           <div><b>▲</b> ジャンプ（クリエイティブでは二度押しで飛行）　<b>⇩</b> スニーク切替（飛行中は下降）</div>
           <div><b>⋯</b> 持ち物・クラフト　下のバーをタップして選択</div>
         </div>
+        <div class="settings">
+          <div class="setting">
+            <div class="label">ゲームモード</div>
+            <div class="seg">
+              <button data-mode="survival">サバイバル</button>
+              <button data-mode="creative">クリエイティブ</button>
+              <button data-mode="adventure">アドベンチャー</button>
+              <button data-mode="spectator">スペクテイター</button>
+            </div>
+            <p class="desc" id="mode-desc"></p>
+          </div>
+          <div class="setting">
+            <div class="label">難易度</div>
+            <div class="seg">
+              <button data-diff="peaceful">ピースフル</button>
+              <button data-diff="easy">イージー</button>
+              <button data-diff="normal">ノーマル</button>
+              <button data-diff="hard">ハード</button>
+            </div>
+            <p class="desc" id="diff-desc"></p>
+          </div>
+        </div>
         <div class="actions">
-          <button id="gamemode" class="secondary">ゲームモード: サバイバル</button>
           <button id="save" class="secondary">セーブ</button>
           <button id="newworld" class="secondary">新しい世界を生成</button>
           <button id="reset" class="secondary danger">セーブデータを削除</button>
