@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { BLOCK } from './blocks.js';
-import { moveAxis, feetInWater, hasGroundBelow } from './physics.js';
+import { BLOCK, BLOCKS, CLIMBABLE, SLIPPERY, BOUNCY } from './blocks.js';
+import { moveEntity, feetInWater, cellsTouching } from './physics.js';
 
 const WALK_SPEED = 4.3;
 const SPRINT_SPEED = 5.6;
@@ -44,6 +44,9 @@ export class Player {
     this.velocity = new THREE.Vector3();
     this.width = 0.6;
     this.height = 1.8;
+    this.stepHeight = 0.6;
+    this.armor = { points: 0, toughness: 0 }; // main.js が持ち物から設定する
+    this.onArmorHit = null;
     this.yaw = 0;
     this.pitch = 0;
     this.onGround = false;
@@ -152,7 +155,7 @@ export class Player {
     return on;
   }
 
-  // ダメージ (true: 適用された)。fromMob のときは難易度で倍率がかかる
+  // ダメージ (true: 適用された)。fromMob のときは難易度の倍率と防具の軽減がかかる
   damage(amount, knockback = null, fromMob = false) {
     if (this.dead || amount <= 0) return false;
     if (!this.hasStats) return false;
@@ -160,7 +163,14 @@ export class Player {
     if (fromMob) {
       amount = amount * DIFFICULTY_RULES[this.difficulty].mobDamage;
       if (amount <= 0) return false;
-      amount = Math.max(1, Math.round(amount));
+      // Minecraft の防具の計算式
+      const { points, toughness } = this.armor;
+      if (points > 0) {
+        const reduce = Math.min(20, Math.max(points / 5, points - amount / (2 + toughness / 4))) / 25;
+        this.onArmorHit?.(Math.max(1, Math.floor(amount / 4)));
+        amount *= 1 - reduce;
+      }
+      amount = Math.max(0.5, Math.round(amount * 2) / 2);
     }
     this.health = Math.max(0, this.health - amount);
     this.hurtTimer = 0.5;
@@ -243,7 +253,9 @@ export class Player {
       this.fallDistance = 0;
     } else {
       const speed = this.sneaking ? SNEAK_SPEED : this.sprinting ? SPRINT_SPEED : WALK_SPEED;
-      const accel = this.onGround ? 1 - Math.exp(-dt * 16) : 1 - Math.exp(-dt * 4);
+      const below = this.world.get(Math.floor(p.x), Math.floor(p.y - 0.05), Math.floor(p.z));
+      const grip = SLIPPERY[below] ? 2 : 16;
+      const accel = this.onGround ? 1 - Math.exp(-dt * grip) : 1 - Math.exp(-dt * 4);
       this.velocity.x += (mx * speed - this.velocity.x) * accel;
       this.velocity.z += (mz * speed - this.velocity.z) * accel;
       this.velocity.y -= GRAVITY * dt;
@@ -256,24 +268,35 @@ export class Player {
       if (this.velocity.y < 0) this.fallDistance += -this.velocity.y * dt;
     }
 
-    // 軸ごとに移動して衝突解決。スニーク中は足場の端から落ちない
-    const half = this.width / 2;
-    const wasOnGround = this.onGround;
-    this.onGround = false;
-    this.hitWall = false;
-    const guard = this.sneaking && wasOnGround;
-    const px0 = p.x;
-    moveAxis(this.world, this, 0, this.velocity.x * dt, half);
-    if (guard && !hasGroundBelow(this.world, this)) { p.x = px0; this.velocity.x = 0; }
-    const pz0 = p.z;
-    moveAxis(this.world, this, 2, this.velocity.z * dt, half);
-    if (guard && !hasGroundBelow(this.world, this)) { p.z = pz0; this.velocity.z = 0; }
-    moveAxis(this.world, this, 1, this.velocity.y * dt, half);
-
-    // 着地時の落下ダメージ
-    if (this.onGround && this.fallDistance > 0) {
-      if (this.fallDistance > 3.5 && !this.inWater) this.damage(Math.floor(this.fallDistance - 3));
+    // はしご: 前に進むかジャンプで登り、スニークで止まる
+    const onLadder = !this.flying && cellsTouching(this).some(([x, y, z]) => CLIMBABLE[this.world.get(x, y, z)]);
+    if (onLadder) {
+      this.velocity.x = Math.max(-2, Math.min(2, this.velocity.x));
+      this.velocity.z = Math.max(-2, Math.min(2, this.velocity.z));
+      if (this.velocity.y < -2.35) this.velocity.y = -2.35;
+      if (this.sneaking && this.velocity.y < 0) this.velocity.y = 0;
+      if (jump || (this.hitWall && this.moving)) this.velocity.y = 2.35;
       this.fallDistance = 0;
+    }
+
+    // 移動と衝突解決 (段差の自動乗り越え、スニーク中は足場の端から落ちない)
+    const vyBefore = this.velocity.y;
+    this.sneakGuard = this.sneaking && !this.flying;
+    moveEntity(this.world, this, dt);
+
+    // 着地
+    if (this.onGround) {
+      const below = this.world.get(Math.floor(p.x), Math.floor(p.y - 0.05), Math.floor(p.z));
+      const def = BLOCKS[below];
+      if (BOUNCY[below] && !this.sneaking && vyBefore < -2) {
+        this.velocity.y = -vyBefore * 0.85; // スライムブロックで跳ねる
+        this.onGround = false;
+        this.fallDistance = 0;
+      } else if (this.fallDistance > 0) {
+        const mult = def?.fallMult ?? 1;
+        if (this.fallDistance > 3.5 && !this.inWater && mult > 0) this.damage(Math.ceil((this.fallDistance - 3) * mult));
+        this.fallDistance = 0;
+      }
     }
     if (this.moving && this.onGround) this.exhaustion += (this.sprinting ? 0.1 : 0.01) * len * WALK_SPEED * dt;
 

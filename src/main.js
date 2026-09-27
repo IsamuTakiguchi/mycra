@@ -2,17 +2,18 @@ import * as THREE from 'three';
 import { World } from './world.js';
 import { Player, GAME_MODES, DIFFICULTIES } from './player.js';
 import { raycastVoxel } from './raycast.js';
-import { BLOCK, BLOCKS, isSolid, createCrackTexture } from './blocks.js';
+import { BLOCK, BLOCKS, FULL, REPLACEABLE, TOUCH_DAMAGE, FACING_DIRS, blockId, createCrackTexture } from './blocks.js';
 import { ITEMS, itemName } from './items.js';
-import { Inventory, HOTBAR_SIZE } from './inventory.js';
+import { Inventory, HOTBAR_SIZE, CONTAINER_SIZE, serializeSlots, loadSlots } from './inventory.js';
 import { InventoryScreen } from './ui.js';
 import { HUD } from './hud.js';
 import { HandView } from './hand.js';
-import { DropManager } from './drops.js';
+import { DropManager, buildItemMesh } from './drops.js';
 import { MobManager } from './mobs.js';
 import { buildMobModel } from './models.js';
 import { TouchControls, isTouchDevice } from './touch.js';
-import { intersectsBlock } from './physics.js';
+import { blockIntersectsEntity, cellsTouching } from './physics.js';
+import { META } from './shapes.js';
 import { mulberry32 } from './noise.js';
 import { DAY_LENGTH } from './constants.js';
 
@@ -98,12 +99,15 @@ let useRepeat = 0;
 let eatTimer = 0;
 let lastSpaceTap = 0;
 let lastForwardTap = 0;
+let bowDraw = -1; // 弓を引いている時間 (-1 は引いていない)
+let saplingTimer = 0;
+const primedTnt = [];
 let modelAnim = 0;
 let fps = 0, frames = 0, fpsTime = 0;
 let spawnRand = mulberry32(1);
 
 const hud = new HUD({
-  hearts: $('hearts'), hunger: $('hunger'), hotbar: $('hotbar'), info: $('info'),
+  hearts: $('hearts'), hunger: $('hunger'), armor: $('armor'), hotbar: $('hotbar'), info: $('info'),
   itemName: $('item-name'), stats: $('stats'), damage: $('damage'), toast: $('toast'),
 });
 
@@ -133,6 +137,7 @@ function save(showToast = false) {
       difficulty: player.difficulty, health: player.health, hunger: player.hunger, spawnPoint: player.spawnPoint,
     },
     inventory: inventory.serialize(),
+    containers: [...world.containers].map(([k, slots]) => [k, serializeSlots(slots)]),
     timeOfDay,
     mobs: mobs.serialize(),
     drops: drops.serialize(),
@@ -157,6 +162,9 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
   world = new World(seed);
   world.generate();
   if (saveData?.edits) world.applyEdits(saveData.edits);
+  for (const [k, slots] of saveData?.containers ?? []) world.containers.set(k, loadSlots(slots, CONTAINER_SIZE));
+  for (const t of primedTnt) scene.remove(t.mesh);
+  primedTnt.length = 0;
   world.buildAll();
   scene.add(world.group);
 
@@ -186,6 +194,12 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
     player.spawn(sp.x, sp.z);
   }
   if (saveData?.inventory) inventory.load(saveData.inventory);
+  player.onArmorHit = (n) => {
+    const broken = inventory.damageArmor(n);
+    if (broken.length) hud.toast(`${itemName(broken[0])}が壊れた`);
+    updateArmor();
+  };
+  updateArmor();
   if (saveData?.mobs) mobs.load(saveData.mobs);
   else mobs.populate(spawnRand);
   if (saveData?.drops) drops.load(saveData.drops);
@@ -339,7 +353,7 @@ canvas.addEventListener('mousedown', (e) => {
 });
 document.addEventListener('mouseup', (e) => {
   if (e.button === 0) stopMining();
-  if (e.button === 2) { useHeld = false; eatTimer = 0; }
+  if (e.button === 2) { useHeld = false; eatTimer = 0; releaseBow(); }
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -411,14 +425,31 @@ screen = new InventoryScreen($('inv-screen'), null, {
   onClose: () => closeInventory(),
   getStations: () => nearbyStations(),
   onDropStack: (stack) => dropStack(stack),
+  onChange: () => { hud.renderHotbar(inventory); updateArmor(); },
 });
 
 function openInventory() {
-  screen.show(player.creative || player.spectator ? 'creative' : 'survival');
+  showScreen(player.creative || player.spectator ? 'creative' : 'survival');
+}
+
+function showScreen(mode, container = null) {
+  screen.show(mode, container);
   player.keys.clear();
   stopMining();
   useHeld = false;
+  bowDraw = -1;
   if (locked) document.exitPointerLock();
+}
+
+function openContainer(hit) {
+  const key = `${hit.x},${hit.y},${hit.z}`;
+  let slots = world.containers.get(key);
+  if (!slots) { slots = new Array(CONTAINER_SIZE).fill(null); world.containers.set(key, slots); }
+  showScreen('container', { title: BLOCKS[hit.id].label, slots });
+}
+
+function updateArmor() {
+  player.armor = inventory.armorStats();
 }
 
 function closeInventory() {
@@ -435,9 +466,8 @@ function nearbyStations() {
   for (let x = Math.floor(p.x - r); x <= Math.floor(p.x + r); x++) {
     for (let y = Math.floor(p.y - r); y <= Math.floor(p.y + r); y++) {
       for (let z = Math.floor(p.z - r); z <= Math.floor(p.z + r); z++) {
-        const id = world.get(x, y, z);
-        if (id === BLOCK.CRAFTING_TABLE) set.add('crafting_table');
-        else if (id === BLOCK.FURNACE) set.add('furnace');
+        const st = BLOCKS[world.get(x, y, z)]?.station;
+        if (st) set.add(st);
       }
     }
   }
@@ -456,14 +486,14 @@ function dropStack(stack) {
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
   const eye = player.eyePosition();
-  drops.spawn(stack.id, stack.count, eye.x + dir.x * 0.5, eye.y - 0.3, eye.z + dir.z * 0.5, new THREE.Vector3(dir.x * 5, 2 + dir.y * 4, dir.z * 5));
+  drops.spawn(stack.id, stack.count, eye.x + dir.x * 0.5, eye.y - 0.3, eye.z + dir.z * 0.5, new THREE.Vector3(dir.x * 5, 2 + dir.y * 4, dir.z * 5), stack.damage ?? 0);
 }
 
 function dropSelected(whole) {
   const s = inventory.selectedItem;
   if (!s) return;
   const n = whole ? s.count : 1;
-  dropStack({ id: s.id, count: n });
+  dropStack({ id: s.id, count: n, damage: s.damage });
   inventory.consumeSelected(n);
   hud.renderHotbar(inventory);
   hand.setItem(inventory.selectedItem?.id ?? null);
@@ -514,11 +544,21 @@ function attack() {
   if (!mob) return false;
   hand.swing();
   const item = inventory.selectedItem;
-  const dmg = item && ITEMS[item.id].damage ? ITEMS[item.id].damage : 1;
+  const def = item ? ITEMS[item.id] : null;
+  const dmg = def?.damage ?? 1;
   mob.damage(dmg, player.position);
   player.attackCooldown = 0.6;
   player.exhaustion += 0.1;
+  if (def?.maxDamage && def.tool && player.consumesItems) {
+    if (inventory.damageSelected(def.tool === 'sword' ? 1 : 2)) toolBroke(def);
+  }
   return true;
+}
+
+function toolBroke(def) {
+  hud.toast(`${def.name}が壊れた`);
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
 }
 
 function startMining() {
@@ -536,16 +576,18 @@ function stopMining() {
   touchAim = null;
 }
 
-// 破壊にかかる時間 (秒) と、ドロップするか
-function breakInfo(def, item) {
-  if (def.unbreakable) return null;
-  if (def.hardness <= 0) return { time: 0.05, drops: true };
-  const tool = item ? ITEMS[item.id] : null;
-  const rightTool = tool?.tool && tool.tool === def.tool;
-  const required = def.tool && def.minTier >= 0;
-  if (required && !(rightTool && tool.tier >= def.minTier)) return { time: def.hardness * 5, drops: false };
-  if (rightTool) return { time: (def.hardness * 1.5) / tool.speed, drops: true };
-  return { time: def.hardness * 1.5, drops: true };
+// Minecraft の採掘時間の計算
+function breakInfo(def, stack) {
+  if (def.unbreakable || def.hardness < 0) return null;
+  if (def.hardness === 0) return { time: 0.05, drops: true };
+  const tool = stack ? ITEMS[stack.id] : null;
+  const rightTool = !!(tool?.tool && def.tool && tool.tool === def.tool);
+  let speed = rightTool ? tool.speed : 1;
+  if (tool?.tool === 'shears' && def.shears) speed = 15;
+  if (tool?.tool === 'sword' && def.shears) speed = 1.5;
+  const needs = def.tool && def.minTier >= 0;
+  const canHarvest = !needs || (rightTool && (tool.tier ?? 0) >= def.minTier);
+  return { time: (def.hardness * (canHarvest ? 1.5 : 5)) / speed, drops: canHarvest };
 }
 
 function updateMining(dt) {
@@ -557,18 +599,28 @@ function updateMining(dt) {
   const hit = blockTarget();
   if (!hit) { mining.progress = 0; mining.key = null; return; }
   const def = BLOCKS[hit.id];
-  const info = breakInfo(def, inventory.selectedItem);
+  const stack = inventory.selectedItem;
+  const info = breakInfo(def, stack);
   if (!info) { mining.progress = 0; mining.key = null; return; }
   const key = `${hit.x},${hit.y},${hit.z}`;
   if (mining.key !== key) { mining.key = key; mining.progress = 0; }
   if (player.creative) {
-    breakBlockAt(hit, false);
+    // クリエイティブでは剣を持っていると壊せない (Minecraft と同じ)
+    if (ITEMS[stack?.id]?.tool === 'sword') return;
+    removeBlock(hit.x, hit.y, hit.z, false);
+    hand.swing();
     mining.cooldown = 0.25;
     return;
   }
   mining.progress += dt / info.time;
   if (mining.progress >= 1) {
-    breakBlockAt(hit, info.drops);
+    removeBlock(hit.x, hit.y, hit.z, info.drops && player.consumesItems, stack);
+    hand.swing();
+    const tool = stack && ITEMS[stack.id];
+    if (tool?.maxDamage && tool.tool && def.hardness > 0 && player.consumesItems) {
+      if (inventory.damageSelected(tool.tool === 'sword' ? 2 : 1)) toolBroke(tool);
+      else hud.renderHotbar(inventory);
+    }
     mining.progress = 0;
     mining.key = null;
     mining.cooldown = 0.25;
@@ -576,41 +628,402 @@ function updateMining(dt) {
   }
 }
 
+// 旧 API (テスト用)
 function breakBlockAt(hit, withDrops) {
-  const def = BLOCKS[hit.id];
-  world.set(hit.x, hit.y, hit.z, BLOCK.AIR);
-  hand.swing();
-  if (!withDrops || !player.consumesItems) return;
-  if (def.drop) drops.spawn(def.drop, 1, hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
-  if (def.dropChance) {
-    for (const [id, p] of Object.entries(def.dropChance)) if (Math.random() < p) drops.spawn(id, 1, hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+  removeBlock(hit.x, hit.y, hit.z, withDrops && player.consumesItems, inventory.selectedItem);
+}
+
+const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+
+function spawnBlockDrops(def, meta, x, y, z, stack) {
+  const tool = stack ? ITEMS[stack.id] : null;
+  const at = [x + 0.5, y + 0.5, z + 0.5];
+  if (def.shears && tool?.tool === 'shears') { drops.spawn(def.item, 1, ...at); return; }
+  if (def.drop) {
+    let n = def.dropCount ? randInt(def.dropCount[0], def.dropCount[1]) : 1;
+    if (def.shape === 'slab' && (meta & META.DOUBLE)) n = 2;
+    if (n > 0) drops.spawn(def.drop, n, ...at);
   }
-  // たいまつは支えを失うと落ちる
-  const above = world.get(hit.x, hit.y + 1, hit.z);
-  if (above === BLOCK.TORCH) { world.set(hit.x, hit.y + 1, hit.z, BLOCK.AIR); drops.spawn('torch', 1, hit.x + 0.5, hit.y + 1.3, hit.z + 0.5); }
+  if (def.dropChance) {
+    for (const [id, p] of Object.entries(def.dropChance)) if (Math.random() < p) drops.spawn(id, 1, ...at);
+  }
+}
+
+// ブロックを取り除く。ドア・ベッドのもう半分、チェストの中身、支えを失ったブロックも処理する
+function removeBlock(x, y, z, withDrops, stack = null) {
+  const id = world.get(x, y, z);
+  if (!id) return;
+  const meta = world.getMeta(x, y, z);
+  const def = BLOCKS[id];
+  world.set(x, y, z, BLOCK.AIR);
+  if (def.shape === 'door') {
+    const oy = meta & META.UP ? y - 1 : y + 1;
+    if (world.get(x, oy, z) === id) world.set(x, oy, z, BLOCK.AIR);
+  }
+  if (def.bed) {
+    const [dx, dz] = FACING_DIRS[meta & 3];
+    const s = meta & META.UP ? -1 : 1;
+    if (world.get(x + dx * s, y, z + dz * s) === id) world.set(x + dx * s, y, z + dz * s, BLOCK.AIR);
+  }
+  const key = `${x},${y},${z}`;
+  const cont = world.containers.get(key);
+  if (cont) {
+    drops.spawnStacks(cont.filter(Boolean), x + 0.5, y + 0.5, z + 0.5);
+    world.containers.delete(key);
+    if (screen.open && screen.container?.slots === cont) closeInventory();
+  }
+  if (withDrops) spawnBlockDrops(def, meta, x, y, z, stack);
+  // 支えを失ったブロック (上の草花・松明、壁のはしご・ボタンなど)
+  checkSupport(x, y + 1, z);
+  checkSupport(x, y - 1, z);
+  for (const [dx, dz] of FACING_DIRS) checkSupport(x + dx, y, z + dz);
+}
+
+function checkSupport(x, y, z) {
+  const id = world.get(x, y, z);
+  if (!id || !BLOCKS[id].support) return;
+  if (!isSupported(x, y, z, id, world.getMeta(x, y, z))) removeBlock(x, y, z, player.consumesItems);
+}
+
+const DIRTLIKE = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'rooted_dirt', 'mycelium', 'moss_block', 'mud', 'farmland'].map(blockId));
+const CANE_SOIL = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'sand', 'red_sand', 'mud', 'moss_block'].map(blockId));
+
+// 支えになる面か (Minecraft の「しっかりした面」)。face: 'top' | 'bottom' | 'side'
+function sturdy(x, y, z, face) {
+  const id = world.get(x, y, z);
+  if (FULL[id]) return true;
+  const d = BLOCKS[id];
+  if (!d?.solid) return false;
+  const m = world.getMeta(x, y, z);
+  if (d.shape === 'slab') return !!(m & META.DOUBLE) || (face === 'top' ? !!(m & META.UP) : face === 'bottom' ? !(m & META.UP) : false);
+  if (d.shape === 'stairs') return face === 'top' ? !!(m & META.UP) : face === 'bottom' ? !(m & META.UP) : false;
+  return false;
+}
+
+function isSupported(x, y, z, id, meta) {
+  const def = BLOCKS[id];
+  const below = world.get(x, y - 1, z);
+  switch (def.support) {
+    case 'below': {
+      if (def.shape === 'door' && (meta & META.UP)) return world.get(x, y - 1, z) === id;
+      if (def.bed) return sturdy(x, y - 1, z, 'top') || below === id;
+      if (def.shape === 'torch') return sturdy(x, y - 1, z, 'top') || FACING_DIRS.some(([dx, dz]) => sturdy(x + dx, y, z + dz, 'side'));
+      if (def.soil === 'dirtlike') return DIRTLIKE.has(below);
+      if (def.soil === 'cane') {
+        if (below === id) return true;
+        return CANE_SOIL.has(below) && FACING_DIRS.some(([dx, dz]) => world.get(x + dx, y - 1, z + dz) === BLOCK.WATER);
+      }
+      if (Array.isArray(def.soil)) return def.soil.map(blockId).includes(below);
+      return sturdy(x, y - 1, z, 'top');
+    }
+    case 'wall': {
+      const [dx, dz] = FACING_DIRS[((meta & 3) + 2) % 4];
+      return sturdy(x + dx, y, z + dz, 'side');
+    }
+    case 'face': {
+      const f = meta & 7;
+      if (f === 4) return sturdy(x, y - 1, z, 'top');
+      if (f === 5) return sturdy(x, y + 1, z, 'bottom');
+      const [dx, dz] = FACING_DIRS[(f + 2) % 4];
+      return sturdy(x + dx, y, z + dz, 'side');
+    }
+    default:
+      return true;
+  }
+}
+
+// プレイヤーの向いている水平方向 (0 北, 1 東, 2 南, 3 西)
+function lookFacing() {
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+  if (Math.abs(fx) > Math.abs(fz)) return fx > 0 ? 1 : 3;
+  return fz > 0 ? 2 : 0;
+}
+
+function dirIndex(n) {
+  if (n[2] === -1) return 0;
+  if (n[0] === 1) return 1;
+  if (n[2] === 1) return 2;
+  return 3;
+}
+
+// 置くときのメタデータ (向き・上下など)。置けない場合は null
+function placementMeta(def, hit, x, y, z) {
+  const look = lookFacing();
+  const n = hit.normal;
+  const upper = n[1] === -1 || (n[1] === 0 && (hit.frac?.[1] ?? 0) > 0.5);
+  if (def.axis) return n[1] !== 0 ? 0 : n[0] !== 0 ? 1 : 2;
+  switch (def.shape) {
+    case 'slab': return upper ? META.UP : 0;
+    case 'stairs': return look | (upper ? META.UP : 0);
+    case 'trapdoor': return (n[1] === 0 ? dirIndex(n) : (look + 2) % 4) | (upper ? META.UP : 0);
+    case 'ladder': return n[1] !== 0 ? null : dirIndex(n);
+    case 'button': return n[1] === 1 ? 4 : n[1] === -1 ? 5 : dirIndex(n);
+    case 'door': {
+      // 左隣に同じドアがあれば、両開きになるようにヒンジを右にする
+      const [lx, lz] = FACING_DIRS[(look + 3) % 4];
+      const left = world.get(x + lx, y, z + lz);
+      const hinge = left === def.id && !(world.getMeta(x + lx, y, z + lz) & META.HINGE) ? META.HINGE : 0;
+      return look | hinge;
+    }
+    default:
+      if (def.facing === 'toward') return (look + 2) % 4;
+      if (def.facing === 'look') return look;
+      return 0;
+  }
+}
+
+function isFree(x, y, z) {
+  if (!world.inBounds(x, y, z)) return false;
+  const id = world.get(x, y, z);
+  return id === BLOCK.AIR || REPLACEABLE[id] === 1;
+}
+
+function consumeHeld() {
+  if (!player.consumesItems) return;
+  inventory.consumeSelected(1);
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+}
+
+function placeBlock(hit, id) {
+  hand.swing();
+  if (!hit) return false;
+  const def = BLOCKS[id];
+  let x, y, z;
+  if (REPLACEABLE[hit.id] && hit.id !== id && hit.id !== BLOCK.WATER) {
+    x = hit.x; y = hit.y; z = hit.z;
+  } else {
+    // ハーフブロックの上 (または下) に同じハーフブロックを置くと 2 枚重ねになる
+    if (def.shape === 'slab' && hit.id === id) {
+      const m = world.getMeta(hit.x, hit.y, hit.z);
+      if (!(m & META.DOUBLE) && ((hit.normal[1] === 1 && !(m & META.UP)) || (hit.normal[1] === -1 && (m & META.UP)))) {
+        world.set(hit.x, hit.y, hit.z, id, META.DOUBLE);
+        consumeHeld();
+        return true;
+      }
+    }
+    x = hit.x + hit.normal[0]; y = hit.y + hit.normal[1]; z = hit.z + hit.normal[2];
+  }
+  if (!world.inBounds(x, y, z)) return false;
+  const existing = world.get(x, y, z);
+  if (def.shape === 'slab' && existing === id) {
+    const m = world.getMeta(x, y, z);
+    if (m & META.DOUBLE) return false;
+    world.set(x, y, z, id, META.DOUBLE);
+    consumeHeld();
+    return true;
+  }
+  if (!isFree(x, y, z)) return false;
+  const meta = placementMeta(def, hit, x, y, z);
+  if (meta === null) return false;
+  if (def.solid) {
+    if (!player.spectator && blockIntersectsEntity(world, x, y, z, id, meta, player)) return false;
+    for (const m of mobs.mobs) if (!m.dead && blockIntersectsEntity(world, x, y, z, id, meta, m)) return false;
+  }
+  if (def.support && !isSupported(x, y, z, id, meta)) return false;
+  if (def.shape === 'door') {
+    if (!isFree(x, y + 1, z)) return false;
+    world.set(x, y, z, id, meta);
+    world.set(x, y + 1, z, id, meta | META.UP);
+  } else if (def.bed) {
+    const [dx, dz] = FACING_DIRS[meta & 3];
+    if (!isFree(x + dx, y, z + dz) || !sturdy(x + dx, y - 1, z + dz, 'top')) return false;
+    world.set(x, y, z, id, meta);
+    world.set(x + dx, y, z + dz, id, meta | META.UP);
+  } else {
+    world.set(x, y, z, id, meta);
+  }
+  if (def.container) world.containers.set(`${x},${y},${z}`, new Array(CONTAINER_SIZE).fill(null));
+  if (def.powderTo) hardenPowder(x, y, z);
+  consumeHeld();
+  return true;
+}
+
+// コンクリートパウダーは水に触れるとコンクリートになる
+function hardenPowder(x, y, z) {
+  const def = BLOCKS[world.get(x, y, z)];
+  if (!def?.powderTo) return;
+  const touching = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([dx, dy, dz]) => world.get(x + dx, y + dy, z + dz) === BLOCK.WATER);
+  if (touching) world.set(x, y, z, blockId(def.powderTo));
+}
+
+function toggleOpen(hit) {
+  const def = BLOCKS[hit.id];
+  const m = world.getMeta(hit.x, hit.y, hit.z) ^ META.OPEN;
+  world.setMeta(hit.x, hit.y, hit.z, m);
+  if (def.shape === 'door') {
+    const oy = m & META.UP ? hit.y - 1 : hit.y + 1;
+    if (world.get(hit.x, oy, hit.z) === hit.id) world.setMeta(hit.x, oy, hit.z, (world.getMeta(hit.x, oy, hit.z) & ~META.OPEN) | (m & META.OPEN));
+  }
+  hand.swing();
+}
+
+function sleepInBed(hit) {
+  const m = world.getMeta(hit.x, hit.y, hit.z);
+  const [dx, dz] = FACING_DIRS[m & 3];
+  const foot = m & META.UP ? { x: hit.x - dx, z: hit.z - dz } : { x: hit.x, z: hit.z };
+  player.spawnPoint = foot;
+  if (daylight > 0.35) {
+    hud.toast('リスポーン地点を設定しました。眠れるのは夜だけです');
+    return;
+  }
+  const monster = mobs.mobs.some((mb) => mb.def.hostile && !mb.dead && mb.position.distanceTo(player.position) < 8);
+  if (monster) { hud.toast('近くにモンスターがいるので、今は休むことができません'); return; }
+  timeOfDay = 0.26;
+  hud.toast('朝になりました');
+  save();
+}
+
+// TNT に火をつける
+function igniteTnt(x, y, z, fuse = 4) {
+  world.set(x, y, z, BLOCK.AIR);
+  const mesh = buildItemMesh('tnt');
+  mesh.material = mesh.material.clone();
+  mesh.position.set(x + 0.5, y + 0.5, z + 0.5);
+  scene.add(mesh);
+  primedTnt.push({ x: x + 0.5, y: y + 0.5, z: z + 0.5, fuse, mesh });
+}
+
+function updateTnt(dt) {
+  for (let i = primedTnt.length - 1; i >= 0; i--) {
+    const t = primedTnt[i];
+    t.fuse -= dt;
+    t.mesh.material.emissive.setHex(Math.floor(t.fuse * 4) % 2 ? 0x777777 : 0x000000);
+    if (t.fuse <= 0) {
+      scene.remove(t.mesh);
+      primedTnt.splice(i, 1);
+      explode(t.x, t.y, t.z, 4);
+    }
+  }
+}
+
+// 爆発 (クリーパー・TNT 共通)
+function explode(cx, cy, cz, power, source = null) {
+  world.explode(cx, cy, cz, power, (x, y, z, id, meta) => {
+    const def = BLOCKS[id];
+    if (def.tnt) { igniteTnt(x, y, z, 0.5 + Math.random()); world.set(x, y, z, BLOCK.AIR); return; }
+    const key = `${x},${y},${z}`;
+    const cont = world.containers.get(key);
+    if (cont) { drops.spawnStacks(cont.filter(Boolean), x + 0.5, y + 0.5, z + 0.5); world.containers.delete(key); }
+    if (Math.random() < 1 / power) spawnBlockDrops(def, meta, x, y, z, null);
+  });
+  const center = new THREE.Vector3(cx, cy, cz);
+  const d = player.position.clone().add(new THREE.Vector3(0, 0.9, 0)).distanceTo(center);
+  const r = power * 2;
+  if (d < r) {
+    const impact = 1 - d / r;
+    const dmg = Math.floor(((impact * impact + impact) / 2) * 7 * r + 1);
+    const dx = player.position.x - cx, dz = player.position.z - cz;
+    const l = Math.hypot(dx, dz) || 1;
+    if (player.damage(dmg, { x: (dx / l) * 10 * impact, z: (dz / l) * 10 * impact }, true)) hud.flashDamage();
+  }
+  mobs.blast(cx, cy, cz, power, source);
+}
+
+// バケツ: 水をくむ / 置く
+function useBucket(def) {
+  player.eyePosition(eye);
+  aimDirection();
+  const hit = raycastVoxel(world, eye, dir, reach(), { fluids: true });
+  if (!hit) return;
+  if (def.bucket === 'empty') {
+    if (hit.id !== BLOCK.WATER) return;
+    world.set(hit.x, hit.y, hit.z, BLOCK.AIR);
+    if (player.consumesItems) {
+      const s = inventory.selectedItem;
+      if (s.count > 1) { s.count -= 1; if (inventory.add('water_bucket', 1) > 0) dropStack({ id: 'water_bucket', count: 1 }); }
+      else inventory.slots[inventory.selected] = { id: 'water_bucket', count: 1 };
+    }
+  } else {
+    if (!player.canBuild) return;
+    let x = hit.x, y = hit.y, z = hit.z;
+    if (!REPLACEABLE[hit.id]) { x += hit.normal[0]; y += hit.normal[1]; z += hit.normal[2]; }
+    if (!isFree(x, y, z)) return;
+    world.set(x, y, z, BLOCK.WATER);
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) hardenPowder(x + dx, y + dy, z + dz);
+    if (player.consumesItems) inventory.slots[inventory.selected] = { id: 'bucket', count: 1 };
+  }
+  hand.swing();
+  hud.renderHotbar(inventory);
+  hand.setItem(inventory.selectedItem?.id ?? null);
+}
+
+// 弓: 右クリックを押している間に引き、離すと射る
+function releaseBow(power = null) {
+  if (bowDraw < 0 && power === null) return;
+  const t = bowDraw;
+  bowDraw = -1;
+  const stack = inventory.selectedItem;
+  if (!ITEMS[stack?.id]?.bow) return;
+  const p = power ?? Math.min(1, (t * t + t * 2) / 3); // Minecraft の引き具合 (1 秒で最大)
+  if (p < 0.1) return;
+  if (player.consumesItems && inventory.count('arrow') <= 0) { hud.toast('矢がありません'); return; }
+  if (player.consumesItems) inventory.remove('arrow', 1);
+  player.eyePosition(eye);
+  aimDirection();
+  const from = eye.clone().addScaledVector(dir, 0.6);
+  mobs.addArrow(from, dir.clone().multiplyScalar(60 * p), 'player', 6 * p, player.consumesItems);
+  if (player.consumesItems && inventory.damageSelected(1)) toolBroke(ITEMS.bow);
+  hand.swing();
+  hud.renderHotbar(inventory);
 }
 
 // 右クリック / タップ: 使う・置く・食べる
-function use(instantEat = false) {
+function use(instant = false) {
   if (player.spectator) return;
-  const item = inventory.selectedItem;
-  const def = item ? ITEMS[item.id] : null;
+  const stack = inventory.selectedItem;
+  const def = stack ? ITEMS[stack.id] : null;
   const hit = blockTarget();
 
-  // 作業台・かまどを開く (スニーク中は開かずにブロックを置ける)
-  if (hit && !player.sneaking && (hit.id === BLOCK.CRAFTING_TABLE || hit.id === BLOCK.FURNACE)) {
-    openInventory();
+  if (hit && !player.sneaking) {
+    const b = BLOCKS[hit.id];
+    if (b.station) { openInventory(); return; }
+    if (b.container) { openContainer(hit); return; }
+    if (b.open) { toggleOpen(hit); return; }
+    if (b.bed) { sleepInBed(hit); return; }
+    if (b.tnt && stack?.id === 'flint_and_steel') {
+      igniteTnt(hit.x, hit.y, hit.z);
+      if (player.consumesItems && inventory.damageSelected(1)) toolBroke(def);
+      hand.swing();
+      return;
+    }
+    if (b.sapling && stack?.id === 'bone_meal') {
+      if (Math.random() < 0.45) world.growSapling(hit.x, hit.y, hit.z);
+      consumeHeld();
+      hand.swing();
+      return;
+    }
+    if (b.name === 'pumpkin' && stack?.id === 'shears') {
+      world.set(hit.x, hit.y, hit.z, blockId('carved_pumpkin'), (lookFacing() + 2) % 4);
+      if (player.consumesItems && inventory.damageSelected(1)) toolBroke(def);
+      hand.swing();
+      return;
+    }
+  }
+  if (def?.armor) {
+    inventory.equipSelected();
+    updateArmor();
+    hud.renderHotbar(inventory);
+    hand.setItem(inventory.selectedItem?.id ?? null);
     return;
   }
   if (def?.food) {
-    if (player.hunger >= 20 && player.hasStats) return;
-    if (instantEat) eatNow();
+    if (player.hunger >= 20 && player.hasStats && stack.id !== 'golden_apple') return;
+    if (instant) eatNow();
     return; // デスクトップでは長押しで食べる (updateUse)
+  }
+  if (def?.bucket) { useBucket(def); return; }
+  if (def?.bow) {
+    if (instant) releaseBow(1);
+    else bowDraw = 0;
+    return;
   }
   if (def?.block !== undefined) {
     if (!player.canBuild) { hud.toast('アドベンチャーモードではブロックを置けません'); return; }
     placeBlock(hit, def.block);
-  } else hand.swing();
+    return;
+  }
+  hand.swing();
 }
 
 function eatNow() {
@@ -618,39 +1031,16 @@ function eatNow() {
   const def = item ? ITEMS[item.id] : null;
   if (!def?.food) return;
   player.eat(def.food);
-  if (player.consumesItems) inventory.consumeSelected(1);
+  if (def.heal) player.health = Math.min(20, player.health + def.heal);
+  if (player.consumesItems) {
+    inventory.consumeSelected(1);
+    if (def.returns && inventory.add(def.returns, 1) > 0) dropStack({ id: def.returns, count: 1 });
+  }
   hud.renderHotbar(inventory);
   hand.setItem(inventory.selectedItem?.id ?? null);
   hand.swing();
   hud.toast(`${def.name}を食べた`);
   eatTimer = 0;
-}
-
-function placeBlock(hit, id) {
-  hand.swing();
-  if (!hit) return;
-  const x = hit.x + hit.normal[0];
-  const y = hit.y + hit.normal[1];
-  const z = hit.z + hit.normal[2];
-  if (!world.inBounds(x, y, z)) return;
-  const existing = world.get(x, y, z);
-  if (existing !== BLOCK.AIR && existing !== BLOCK.WATER) return;
-  const def = BLOCKS[id];
-  if (def.solid) {
-    if (intersectsBlock(player, x, y, z)) return;
-    for (const m of mobs.mobs) if (!m.dead && intersectsBlock(m, x, y, z)) return;
-  }
-  if (id === BLOCK.TORCH) {
-    // 支えになるブロックが必要
-    const supported = isSolid(world.get(x, y - 1, z)) || isSolid(world.get(x + 1, y, z)) || isSolid(world.get(x - 1, y, z)) || isSolid(world.get(x, y, z + 1)) || isSolid(world.get(x, y, z - 1));
-    if (!supported) return;
-  }
-  world.set(x, y, z, id);
-  if (player.consumesItems) {
-    inventory.consumeSelected(1);
-    hud.renderHotbar(inventory);
-    hand.setItem(inventory.selectedItem?.id ?? null);
-  }
 }
 
 // ホイールクリック: 見ているブロックを手に持つ
@@ -667,13 +1057,14 @@ function pickBlock() {
   hand.setItem(inventory.selectedItem?.id ?? null);
 }
 
-// 右クリック長押し: 連続設置 / 食事
+// 右クリック長押し: 連続設置 / 食事 / 弓を引く
 function updateUse(dt) {
+  if (bowDraw >= 0) { bowDraw += dt; return; }
   if (!useHeld) return;
   const item = inventory.selectedItem;
   const def = item ? ITEMS[item.id] : null;
   if (def?.food) {
-    if (player.hunger >= 20 && player.hasStats) return;
+    if (player.hunger >= 20 && player.hasStats && item.id !== 'golden_apple') return;
     eatTimer += dt;
     if (Math.floor(eatTimer * 6) !== Math.floor((eatTimer - dt) * 6)) hand.swing();
     if (eatTimer >= 1.6) eatNow();
@@ -681,6 +1072,24 @@ function updateUse(dt) {
   }
   useRepeat += dt;
   if (useRepeat >= 0.25) { useRepeat = 0; use(); }
+}
+
+// サボテン・マグマブロックのダメージ、苗木の成長
+function updateEnvironment(dt) {
+  if (player.hasStats && !player.dead) {
+    if (cellsTouching(player, 0.05).some(([x, y, z]) => TOUCH_DAMAGE[world.get(x, y, z)])) player.damage(1) && hud.flashDamage();
+    const below = world.get(Math.floor(player.position.x), Math.floor(player.position.y - 0.05), Math.floor(player.position.z));
+    if (player.onGround && !player.sneaking && BLOCKS[below]?.name === 'magma_block') player.damage(1) && hud.flashDamage();
+  }
+  saplingTimer += dt;
+  if (saplingTimer >= 5) {
+    saplingTimer = 0;
+    for (const key of [...world.saplings]) {
+      if (Math.random() > 0.06) continue;
+      const [x, y, z] = key.split(',').map(Number);
+      if (world.lightLevel(x, y + 1, z, daylight) >= 9) world.growSapling(x, y, z);
+    }
+  }
 }
 
 // ---------- 昼夜サイクル ----------
@@ -738,16 +1147,18 @@ function loop(now) {
     player.update(dt);
     updateMining(dt);
     updateUse(dt);
+    updateEnvironment(dt);
     if (player.moving) modelAnim += dt;
   } else if (player.dead && deathEl.classList.contains('hidden')) {
     onDeath();
   }
+  updateTnt(dt);
   world.update(3);
   updateSky(dt);
   mobs.update(dt, player, daylight, {
     drops,
     onPlayerHurt: () => hud.flashDamage(),
-    onExplosion: () => hud.toast('クリーパーが爆発した！'),
+    explode: (x, y, z, power, source) => explode(x, y, z, power, source),
   });
   drops.update(dt, active && !player.spectator ? player : null, inventory, () => { hud.renderHotbar(inventory); if (!hand.item && inventory.selectedItem) hand.setItem(inventory.selectedItem.id); });
   if (player.dead && deathEl.classList.contains('hidden')) onDeath();
@@ -759,10 +1170,15 @@ function loop(now) {
   const hit = active || screen.open ? blockTarget() : null;
   const mob = active ? mobTarget() : null;
   highlight.visible = !!hit && !mob;
-  if (hit) highlight.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+  if (hit) {
+    const b = hit.bounds;
+    highlight.position.set(hit.x + (b[0] + b[3]) / 2, hit.y + (b[1] + b[4]) / 2, hit.z + (b[2] + b[5]) / 2);
+    highlight.scale.set(b[3] - b[0], b[4] - b[1], b[5] - b[2]);
+  }
   if (mining.key && mining.progress > 0 && hit) {
     crackMesh.visible = true;
     crackMesh.position.copy(highlight.position);
+    crackMesh.scale.copy(highlight.scale);
     crack.texture.offset.x = Math.min(crack.stages - 1, Math.floor(mining.progress * crack.stages)) / crack.stages;
   } else crackMesh.visible = false;
 
@@ -777,7 +1193,7 @@ function loop(now) {
     scene.background = skyColor;
   }
 
-  hud.updateStats(player);
+  hud.updateStats(player, player.armor.points);
   frames++;
   fpsTime += dt;
   if (fpsTime >= 0.5) {
@@ -794,7 +1210,7 @@ function loop(now) {
         `モード ${GAME_MODES[player.gameMode]} / ${DIFFICULTIES[player.difficulty]}${player.flying ? ' 飛行' : ''}${player.sneaking ? ' スニーク' : ''}${player.sprinting ? ' ダッシュ' : ''}\n` +
         `モブ ${mobs.mobs.length}  ドロップ ${drops.items.length}\n` +
         `手持ち ${inventory.selectedItem ? itemName(inventory.selectedItem.id) : 'なし'}` +
-        (hit ? `\n注視 ${BLOCKS[hit.id].name} (${hit.x} ${hit.y} ${hit.z})` : '') +
+        (hit ? `\n注視 ${BLOCKS[hit.id].label} (${hit.x} ${hit.y} ${hit.z}) meta ${world.getMeta(hit.x, hit.y, hit.z)}` : '') +
         (mob ? `\n対象 ${mob.def.name} HP ${mob.health}` : ''),
       );
     }
@@ -814,6 +1230,7 @@ function onDeath() {
   if (player.hasStats) {
     const all = inventory.takeAll();
     drops.spawnStacks(all, player.position.x, player.position.y + 0.5, player.position.z);
+    updateArmor();
     hud.renderHotbar(inventory);
     hand.setItem(null);
   }
@@ -848,5 +1265,6 @@ window.__mycra = {
   set timeOfDay(v) { timeOfDay = v; },
   blockTarget, mobTarget, attack, startMining, stopMining, use, placeBlock, pickBlock, save, selectSlot,
   startTouchPlay, showMenu, openInventory, closeInventory, breakBlockAt, eatNow, setGameMode, setDifficulty,
+  removeBlock, explode, igniteTnt, releaseBow, openContainer, updateArmor,
   set thirdPerson(v) { thirdPerson = v; },
 };

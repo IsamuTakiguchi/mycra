@@ -26,7 +26,10 @@
       <div id="bottom">
         <div id="item-name"></div>
         <div id="stats">
-          <div id="hearts" class="stat-row"></div>
+          <div class="stat-col">
+            <div id="armor" class="stat-row"></div>
+            <div id="hearts" class="stat-row"></div>
+          </div>
           <div id="hunger" class="stat-row"></div>
         </div>
         <div id="hotbar"></div>
@@ -55,9 +58,12 @@
       <div id="inv-panel">
         <div id="inv-left-col">
           <h2 id="inv-title">クラフト</h2>
+          <div id="inv-tools"></div>
           <div id="inv-left"></div>
         </div>
         <div id="inv-right-col">
+          <h2>防具</h2>
+          <div id="inv-armor" class="igrid armor-row"></div>
           <h2>持ち物</h2>
           <div id="inv-main" class="igrid"></div>
           <div id="inv-hotbar" class="igrid"></div>
@@ -85,7 +91,7 @@
         <div class="controls" id="controls-desktop">
           <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動　<kbd>マウス</kbd> 視点　<kbd>Space</kbd> ジャンプ</div>
           <div><kbd>Shift</kbd> スニーク　<kbd>Ctrl</kbd> / <kbd>W</kbd> 二度押し ダッシュ</div>
-          <div><kbd>左クリック</kbd> 長押しで壊す / 攻撃　<kbd>右クリック</kbd> 置く / 使う / 食べる</div>
+          <div><kbd>左クリック</kbd> 長押しで壊す / 攻撃　<kbd>右クリック</kbd> 置く / 使う (ドアの開閉・ベッド・チェスト) / 食べる / 弓を引く</div>
           <div><kbd>ホイールクリック</kbd> ブロック選択　<kbd>Q</kbd> 捨てる　<kbd>E</kbd> 持ち物・クラフト</div>
           <div><kbd>1</kbd>〜<kbd>9</kbd> / <kbd>ホイール</kbd> ホットバー　<kbd>F5</kbd> 視点切替　<kbd>F3</kbd> デバッグ　<kbd>F1</kbd> HUD</div>
           <div>クリエイティブ: <kbd>Space</kbd> 二度押しで飛行 (<kbd>Space</kbd> 上昇 / <kbd>Shift</kbd> 下降)</div>

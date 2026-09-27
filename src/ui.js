@@ -1,31 +1,47 @@
-import { ITEMS, RECIPES, CREATIVE_ITEMS, drawItemIcon, itemName, STATION_NAMES } from './items.js';
-import { HOTBAR_SIZE, INVENTORY_SIZE } from './inventory.js';
+import { ITEMS, RECIPES, CREATIVE_TABS, ALL_ITEMS, itemsInTab, itemName, ingredientName, STATION_NAMES, ARMOR_SLOT_NAMES } from './items.js';
+import { HOTBAR_SIZE, INVENTORY_SIZE, CONTAINER_SIZE, moveInto } from './inventory.js';
+import { drawItemIcon } from './icons.js';
 
-// インベントリ画面 (E キー)。サバイバル: 持ち物 + クラフト、クリエイティブ: カタログ + 持ち物
+// インベントリ画面 (E キー)
+//  survival: 持ち物 + レシピ一覧 / creative: タブ付きのアイテム一覧 / container: チェスト・樽
 export class InventoryScreen {
   constructor(root, inventory, handlers) {
     this.root = root;
     this.inv = inventory;
-    this.h = handlers; // { onClose, getStations, onOverflow }
+    this.h = handlers; // { onClose, getStations, onDropStack, onChange }
     this.open = false;
     this.mode = 'survival';
-    this.mainEl = root.querySelector('#inv-main');
-    this.hotbarEl = root.querySelector('#inv-hotbar');
-    this.leftEl = root.querySelector('#inv-left');
-    this.titleEl = root.querySelector('#inv-title');
-    this.cursorEl = root.querySelector('#inv-cursor');
-    this.tipEl = root.querySelector('#inv-tip');
+    this.container = null;
+    this.tab = 'building';
+    this.query = '';
+    this.craftableOnly = true;
+    this.q = (sel) => root.querySelector(sel);
+    this.mainEl = this.q('#inv-main');
+    this.hotbarEl = this.q('#inv-hotbar');
+    this.armorEl = this.q('#inv-armor');
+    this.leftEl = this.q('#inv-left');
+    this.titleEl = this.q('#inv-title');
+    this.toolsEl = this.q('#inv-tools');
+    this.cursorEl = this.q('#inv-cursor');
+    this.tipEl = this.q('#inv-tip');
     this.slotEls = [];
     for (let i = 0; i < INVENTORY_SIZE; i++) {
-      const el = this.makeSlot((e) => this.onSlotClick(i, e));
+      const el = this.makeSlot((e) => { this.inv.clickSlot(i, e.button, e.shiftKey || this.shiftMode(e)); this.changed(); }, i);
       (i < HOTBAR_SIZE ? this.hotbarEl : this.mainEl).appendChild(el.slot);
       this.slotEls.push(el);
     }
-    root.querySelector('#inv-close').addEventListener('click', () => this.h.onClose());
+    this.armorEls = [];
+    for (let i = 0; i < 4; i++) {
+      const el = this.makeSlot((e) => { this.inv.clickArmor(i, e.button); this.changed(); });
+      el.slot.classList.add('armor');
+      el.slot.dataset.label = ARMOR_SLOT_NAMES[i];
+      this.armorEl.appendChild(el.slot);
+      this.armorEls.push(el);
+    }
+    this.q('#inv-close').addEventListener('click', () => this.h.onClose());
     root.addEventListener('contextmenu', (e) => e.preventDefault());
     root.addEventListener('pointermove', (e) => this.moveCursor(e.clientX, e.clientY));
     root.addEventListener('pointerdown', (e) => {
-      // 何もない場所をクリックしたらカーソルの中身を落とす (Minecraft と同じ)
       if (e.target === root && this.inv.cursor) {
         this.h.onDropStack?.(this.inv.cursor);
         this.inv.cursor = null;
@@ -34,38 +50,57 @@ export class InventoryScreen {
     });
   }
 
+  // タッチ操作では長押しの代わりに、ダブルタップで Shift+クリック相当にする
+  shiftMode(e) {
+    if (e.pointerType !== 'touch') return false;
+    const now = performance.now();
+    const dbl = this.lastTap && now - this.lastTap.t < 300 && this.lastTap.target === e.currentTarget;
+    this.lastTap = { t: now, target: e.currentTarget };
+    return dbl;
+  }
+
+  changed() {
+    this.render();
+    this.h.onChange?.();
+  }
+
   makeSlot(onClick) {
     const slot = document.createElement('div');
     slot.className = 'islot';
     const c = document.createElement('canvas');
+    c.width = 32; c.height = 32;
     const count = document.createElement('span');
     count.className = 'count';
-    slot.append(c, count);
+    const bar = document.createElement('div');
+    bar.className = 'dur';
+    slot.append(c, count, bar);
     slot.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); onClick(e); });
     slot.addEventListener('pointerenter', () => this.showTip(slot._id));
     slot.addEventListener('pointerleave', () => this.showTip(null));
-    return { slot, canvas: c, count };
+    return { slot, canvas: c, count, bar, key: '' };
   }
 
   fillSlot(el, stack) {
+    const key = stack ? `${stack.id}:${stack.count}:${stack.damage ?? 0}` : '';
     el.slot._id = stack?.id ?? null;
+    el.slot.classList.toggle('filled', !!stack);
+    if (el.key === key) return;
+    el.key = key;
     if (stack) {
       drawItemIcon(el.canvas, stack.id);
       el.canvas.style.visibility = 'visible';
       el.count.textContent = stack.count > 1 ? String(stack.count) : '';
+      setDurability(el.bar, stack);
     } else {
       el.canvas.style.visibility = 'hidden';
       el.count.textContent = '';
+      el.bar.style.display = 'none';
     }
   }
 
-  onSlotClick(i, e) {
-    this.inv.clickSlot(i, e.button, e.shiftKey);
-    this.render();
-  }
-
-  show(mode) {
+  show(mode, container = null) {
     this.mode = mode;
+    this.container = container;
     this.open = true;
     this.root.classList.remove('hidden');
     this.buildLeft();
@@ -74,6 +109,7 @@ export class InventoryScreen {
 
   hide() {
     this.open = false;
+    this.container = null;
     this.root.classList.add('hidden');
     const dropped = this.inv.returnCursor();
     if (dropped) this.h.onDropStack?.(dropped);
@@ -82,68 +118,149 @@ export class InventoryScreen {
 
   buildLeft() {
     this.leftEl.innerHTML = '';
+    this.toolsEl.innerHTML = '';
+    this.leftEl.className = '';
+    if (this.mode === 'container') {
+      this.titleEl.textContent = this.container.title;
+      const grid = document.createElement('div');
+      grid.className = 'igrid';
+      this.containerEls = [];
+      for (let i = 0; i < CONTAINER_SIZE; i++) {
+        const el = this.makeSlot((e) => {
+          this.inv.clickIn(this.container.slots, i, e.button, e.shiftKey || this.shiftMode(e), (stack) => moveInto(this.inv.slots, stack, 0, INVENTORY_SIZE));
+          this.changed();
+        });
+        grid.appendChild(el.slot);
+        this.containerEls.push(el);
+      }
+      this.leftEl.appendChild(grid);
+      return;
+    }
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = 'アイテムを検索';
+    search.value = this.query;
+    search.className = 'isearch';
+    search.addEventListener('input', () => { this.query = search.value.trim(); this.buildList(); });
+    search.addEventListener('keydown', (e) => e.stopPropagation());
+    this.toolsEl.appendChild(search);
     if (this.mode === 'creative') {
-      this.titleEl.textContent = 'アイテム一覧';
+      this.titleEl.textContent = 'クリエイティブ';
+      const tabs = document.createElement('div');
+      tabs.className = 'itabs';
+      for (const [key, label] of CREATIVE_TABS) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.className = key === this.tab ? 'on' : '';
+        b.addEventListener('click', () => {
+          this.tab = key;
+          this.query = '';
+          search.value = '';
+          for (const x of tabs.children) x.classList.toggle('on', x === b);
+          this.buildList();
+        });
+        tabs.appendChild(b);
+      }
+      this.toolsEl.appendChild(tabs);
+    } else {
+      this.titleEl.textContent = 'クラフト';
+      const label = document.createElement('label');
+      label.className = 'itoggle';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = this.craftableOnly;
+      cb.addEventListener('change', () => { this.craftableOnly = cb.checked; this.buildList(); });
+      label.append(cb, document.createTextNode('作れるものだけ表示'));
+      this.toolsEl.appendChild(label);
+    }
+    this.buildList();
+  }
+
+  buildList() {
+    this.leftEl.innerHTML = '';
+    const q = this.query;
+    const match = (id) => !q || itemName(id).includes(q) || id.includes(q.toLowerCase());
+    if (this.mode === 'creative') {
+      const ids = q ? ALL_ITEMS.filter(match) : itemsInTab(this.tab);
       const grid = document.createElement('div');
       grid.className = 'igrid catalog';
-      for (const id of CREATIVE_ITEMS) {
+      for (const id of ids) {
         const el = this.makeSlot((e) => {
-          if (this.inv.cursor) { this.inv.cursor = null; }
-          else this.inv.cursor = { id, count: e.button === 2 ? 1 : ITEMS[id].maxStack };
-          this.render();
+          if (this.inv.cursor) this.inv.cursor = null;
+          else if (e.shiftKey) {
+            this.inv.add(id, ITEMS[id].maxStack);
+          } else this.inv.cursor = { id, count: e.button === 2 ? 1 : ITEMS[id].maxStack };
+          this.changed();
         });
         this.fillSlot(el, { id, count: 1 });
         grid.appendChild(el.slot);
       }
-      const trash = this.makeSlot(() => { this.inv.cursor = null; this.render(); });
+      const trash = this.makeSlot(() => { this.inv.cursor = null; this.changed(); });
       trash.slot.classList.add('trash');
       trash.slot.title = 'ゴミ箱';
       this.leftEl.append(grid, trash.slot);
       const note = document.createElement('p');
       note.className = 'inote';
-      note.textContent = 'クリックでスタックを取り、持ち物のマスに置く。右クリックで 1 個。';
+      note.textContent = `${ids.length} 種類。クリックでスタック、右クリックで 1 個を持ち、持ち物のマスに置きます。Shift+クリックで直接持ち物へ。`;
       this.leftEl.appendChild(note);
-    } else {
-      this.titleEl.textContent = 'クラフト';
-      this.recipeEls = [];
-      const list = document.createElement('div');
-      list.className = 'recipes';
-      for (const r of RECIPES) {
-        const row = document.createElement('button');
-        row.className = 'recipe';
-        const icon = document.createElement('canvas');
-        drawItemIcon(icon, r.out);
-        const text = document.createElement('div');
-        text.className = 'rtext';
-        const name = document.createElement('div');
-        name.className = 'rname';
-        name.textContent = `${itemName(r.out)}${r.count > 1 ? ' ×' + r.count : ''}`;
-        const ing = document.createElement('div');
-        ing.className = 'ring';
-        ing.textContent = Object.entries(r.in).map(([id, n]) => `${itemName(id)}×${n}`).join('  ');
-        if (r.station) ing.textContent += `　(${STATION_NAMES[r.station]}が必要)`;
-        text.append(name, ing);
-        row.append(icon, text);
-        row.addEventListener('click', () => {
-          const stations = this.h.getStations();
-          const res = this.inv.craft(r, stations);
-          if (res === false) return;
-          if (typeof res === 'number') this.h.onDropStack?.({ id: r.out, count: res });
-          this.render();
-        });
-        list.appendChild(row);
-        this.recipeEls.push({ row, recipe: r });
-      }
-      this.leftEl.appendChild(list);
+      return;
     }
+    const stations = this.h.getStations();
+    const list = document.createElement('div');
+    list.className = 'recipes';
+    this.recipeEls = [];
+    let shown = 0;
+    for (const r of RECIPES) {
+      if (!match(r.out)) continue;
+      const ok = this.inv.canCraft(r, stations);
+      if (this.craftableOnly && !ok) continue;
+      if (++shown > 1000) break;
+      const row = document.createElement('button');
+      row.className = 'recipe' + (ok ? ' ok' : '');
+      const icon = document.createElement('canvas');
+      drawItemIcon(icon, r.out);
+      const text = document.createElement('div');
+      text.className = 'rtext';
+      const name = document.createElement('div');
+      name.className = 'rname';
+      name.textContent = `${itemName(r.out)}${r.count > 1 ? ' ×' + r.count : ''}`;
+      const ing = document.createElement('div');
+      ing.className = 'ring';
+      ing.textContent = Object.entries(r.in).map(([id, n]) => `${ingredientName(id)}×${n}`).join('  ') + (r.fuel ? '  燃料' : '');
+      if (r.station) ing.textContent += `　(${STATION_NAMES[r.station]}が必要)`;
+      text.append(name, ing);
+      row.append(icon, text);
+      row.addEventListener('click', (e) => {
+        const times = e.shiftKey ? 64 : 1;
+        for (let k = 0; k < times; k++) {
+          const res = this.inv.craft(r, this.h.getStations());
+          if (res === false) break;
+          if (typeof res === 'number') { this.h.onDropStack?.({ id: r.out, count: res }); break; }
+        }
+        this.buildList();
+        this.changed();
+      });
+      list.appendChild(row);
+      this.recipeEls.push({ row, recipe: r });
+    }
+    if (!shown) {
+      const p = document.createElement('p');
+      p.className = 'inote';
+      p.textContent = this.craftableOnly ? '今の持ち物で作れるものはありません。「作れるものだけ表示」を外すと全レシピを見られます。' : '見つかりません。';
+      list.appendChild(p);
+    }
+    this.leftEl.appendChild(list);
   }
 
   render() {
     for (let i = 0; i < INVENTORY_SIZE; i++) this.fillSlot(this.slotEls[i], this.inv.slots[i]);
+    for (let i = 0; i < 4; i++) this.fillSlot(this.armorEls[i], this.inv.armor[i]);
+    if (this.mode === 'container' && this.containerEls) {
+      for (let i = 0; i < CONTAINER_SIZE; i++) this.fillSlot(this.containerEls[i], this.container.slots[i]);
+    }
     if (this.inv.cursor) {
       this.cursorEl.classList.remove('hidden');
-      const c = this.cursorEl.querySelector('canvas');
-      drawItemIcon(c, this.inv.cursor.id);
+      drawItemIcon(this.cursorEl.querySelector('canvas'), this.inv.cursor.id);
       this.cursorEl.querySelector('.count').textContent = this.inv.cursor.count > 1 ? String(this.inv.cursor.count) : '';
     } else this.cursorEl.classList.add('hidden');
     if (this.mode === 'survival' && this.recipeEls) {
@@ -158,11 +275,22 @@ export class InventoryScreen {
   }
 
   showTip(id) {
-    if (!id) { this.tipEl.classList.add('hidden'); return; }
-    this.tipEl.textContent = itemName(id);
+    if (!id || !ITEMS[id]) { this.tipEl.classList.add('hidden'); return; }
     const def = ITEMS[id];
-    if (def.food) this.tipEl.textContent += `　満腹度 +${def.food / 2}`;
-    if (def.tool) this.tipEl.textContent += `　攻撃力 ${def.damage}`;
+    let text = def.name;
+    if (def.food) text += `　満腹度 +${def.food / 2}`;
+    if (def.damage && def.tool) text += `　攻撃力 ${def.damage}`;
+    if (def.armor) text += `　防御力 +${def.armor.points}`;
+    this.tipEl.textContent = text;
     this.tipEl.classList.remove('hidden');
   }
+}
+
+export function setDurability(bar, stack) {
+  const max = stack && ITEMS[stack.id]?.maxDamage;
+  if (!max || !stack.damage) { bar.style.display = 'none'; return; }
+  const left = Math.max(0, 1 - stack.damage / max);
+  bar.style.display = 'block';
+  bar.style.setProperty('--w', `${Math.round(left * 100)}%`);
+  bar.style.setProperty('--c', `hsl(${Math.round(left * 120)}, 90%, 45%)`);
 }

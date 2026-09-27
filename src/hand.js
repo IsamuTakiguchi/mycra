@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { ITEMS } from './items.js';
 import { buildItemMesh } from './drops.js';
+import { iconKind } from './icons.js';
 
 // 画面手前に描く一人称の腕と持ち物
 export class HandView {
@@ -62,11 +63,11 @@ export class HandView {
     if (!mesh) {
       mesh = buildItemMesh(key);
       const def = ITEMS[key];
-      if (def.block !== undefined) {
+      if (iconKind(key) === 'iso') {
         mesh.scale.setScalar(0.34);
         mesh.position.set(0.05, 0.12, 0);
         mesh.rotation.set(0.15, 0.75, 0);
-      } else if (def.tool) {
+      } else if (def.tool || def.bow || def.art === 'fishing_rod') {
         mesh.scale.setScalar(0.8);
         mesh.position.set(0.4, 0.2, -0.05);
         mesh.rotation.set(0.1, 0.25, -0.35);
