@@ -24,7 +24,8 @@ html, body {
 
 #game { display: block; width: 100vw; height: 100vh; }
 
-#hud { position: fixed; inset: 0; pointer-events: none; }
+/* タッチ操作の透明層 (z-index 5) より手前に置き、ホットバーのタップを受け取れるようにする */
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 6; }
 
 #crosshair {
   position: absolute; left: 50%; top: 50%; width: 22px; height: 22px;
