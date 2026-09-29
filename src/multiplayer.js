@@ -3,6 +3,7 @@ import { Peer } from 'peerjs';
 import { buildMobModel } from './models.js';
 import { serializeSlots, loadSlots, CONTAINER_SIZE } from './inventory.js';
 import { rayAABB } from './physics.js';
+import { RelayHost, relayConnect, brokerList } from './relay.js';
 
 // ---- マルチプレイ (WebRTC によるブラウザ同士の直接接続) ----
 // ホストのブラウザがサーバー役になり、ワールド・モブ・落ちているアイテム・チェストの中身を管理する。
@@ -32,15 +33,9 @@ function peerOptions() {
   return o;
 }
 
-function errorText(err) {
-  const map = {
-    'peer-unavailable': 'そのルームは見つかりません',
-    network: 'ネットワークに接続できません',
-    'server-error': '接続サーバーに問題があります',
-    'socket-error': '接続サーバーに接続できません',
-    'browser-incompatible': 'このブラウザは対応していません',
-  };
-  return map[err?.type] ?? (err?.message || String(err));
+// ?direct=0 で直接接続を使わない (中継のテスト用)
+function directAllowed() {
+  return new URLSearchParams(location.search).get('direct') !== '0';
 }
 
 export function cleanName(name) {
@@ -148,7 +143,10 @@ export class Multiplayer {
   constructor(game) {
     this.game = game; // main.js が渡す窓口
     this.mode = 'off'; // 'off' | 'host' | 'client'
+    this.session = null; // 公開・参加の試み 1 回ごとの目印 (古い接続からのイベントを無視する)
     this.peer = null;
+    this.relayHost = null;
+    this.via = ''; // 参加者: 'direct' (直接) | 'relay' (中継)
     this.hostConn = null;
     this.connIds = new Map(); // conn -> player id (ホスト側)
     this.proxies = new Map(); // id -> 代理オブジェクト (ホスト側)
@@ -167,6 +165,7 @@ export class Multiplayer {
   get isHost() { return this.mode === 'host'; }
   get isClient() { return this.mode === 'client'; }
   get active() { return this.mode !== 'off'; }
+  get busy() { return !!this.session && !this.active; }
   get playerCount() { return this.isHost ? this.proxies.size + 1 : this.isClient ? this.views.size + 1 : 1; }
 
   inviteUrl() {
@@ -175,7 +174,7 @@ export class Multiplayer {
     u.searchParams.set('join', this.code);
     // テスト用のシグナリング設定は引き継ぐ
     const q = new URLSearchParams(location.search);
-    for (const k of ['peerHost', 'peerPort', 'peerPath', 'peerSecure', 'peerIce']) if (q.get(k)) u.searchParams.set(k, q.get(k));
+    for (const k of ['peerHost', 'peerPort', 'peerPath', 'peerSecure', 'peerIce', 'relay', 'direct']) if (q.get(k)) u.searchParams.set(k, q.get(k));
     return u.toString();
   }
 
@@ -185,36 +184,58 @@ export class Multiplayer {
   }
 
   // ============ ホスト ============
+  // 直接接続 (PeerJS) と中継サーバーの両方で参加者を待ち受ける。どちらか片方でも使えれば公開できる
   host(name, retry = 0) {
-    if (this.active || this.peer) return;
+    if (this.active || this.session) return;
     this.name = cleanName(name) || 'ホスト';
     const code = randomCode();
+    const session = {};
+    this.session = session;
     this.status('公開の準備中...');
-    const peer = new Peer(PREFIX + code, peerOptions());
-    this.peer = peer;
-    peer.on('open', () => {
-      if (this.peer !== peer) return;
-      this.mode = 'host';
-      this.code = code;
-      this.nextId = 1;
-      this.status(`公開中: ルームコード ${code}`);
-      this.game.onNetChange();
-      this.game.chatSys(`ルームコード ${code} でこの世界を公開しました`);
-    });
-    peer.on('connection', (conn) => { if (this.peer === peer && this.isHost) this.acceptClient(conn); });
-    peer.on('disconnected', () => { if (this.peer === peer && !peer.destroyed) peer.reconnect(); });
-    peer.on('error', (err) => {
-      if (this.peer !== peer) return;
-      if (err.type === 'unavailable-id' && retry < 3) {
-        peer.destroy();
-        this.peer = null;
-        this.host(name, retry + 1);
-        return;
-      }
-      // 公開中は、つながらなかった参加者などのエラーは無視する
-      if (this.isHost) return;
-      this.stop({ message: `公開できませんでした: ${errorText(err)}` });
-    });
+    const direct = directAllowed();
+    let directState = direct ? 'pending' : 'failed', relayState = 'pending';
+    const settle = () => {
+      if (this.session !== session) return;
+      if (directState === 'ok' || relayState === 'ok') this.startHosting(code, session, directState === 'ok', relayState === 'ok');
+      else if (directState === 'failed' && relayState === 'failed') this.stop({ message: '公開できませんでした。ネットワークに接続されているか確認してください' });
+    };
+
+    if (direct) {
+      const peer = new Peer(PREFIX + code, peerOptions());
+      this.peer = peer;
+      peer.on('open', () => { directState = 'ok'; settle(); });
+      peer.on('connection', (conn) => { if (this.session === session && this.isHost) this.acceptClient(conn); });
+      peer.on('disconnected', () => { if (this.session === session && !peer.destroyed) peer.reconnect(); });
+      peer.on('error', (err) => {
+        if (this.session !== session) return;
+        if (err.type === 'unavailable-id' && retry < 3 && !this.isHost) {
+          // 同じコードがすでに使われていた: 別のコードでやり直す
+          this.stop();
+          this.host(name, retry + 1);
+          return;
+        }
+        if (directState === 'pending') { directState = 'failed'; settle(); }
+      });
+    }
+
+    const relay = new RelayHost(code, (conn) => { if (this.session === session && this.isHost) this.acceptClient(conn); });
+    this.relayHost = relay;
+    relay.start().then((ok) => { relayState = ok ? 'ok' : 'failed'; settle(); });
+  }
+
+  startHosting(code, session, direct, relay) {
+    if (this.isHost) { this.hostVia = { direct: this.hostVia.direct || direct, relay: this.hostVia.relay || relay }; return; }
+    this.mode = 'host';
+    this.code = code;
+    this.nextId = 1;
+    this.hostVia = { direct, relay };
+    this.hostStatus();
+    this.game.onNetChange();
+    this.game.chatSys(`ルームコード ${code} でこの世界を公開しました`);
+  }
+
+  hostStatus() {
+    this.status(`公開中: ルームコード ${this.code}（${this.playerCount} 人）`);
   }
 
   acceptClient(conn) {
@@ -251,7 +272,7 @@ export class Multiplayer {
         });
         this.broadcast({ t: 'sys', text: `${name} が参加しました` }, conn);
         g.chatSys(`${name} が参加しました`);
-        this.status(`公開中: ルームコード ${this.code}（${this.playerCount} 人）`);
+        this.hostStatus();
         g.onNetChange();
         break;
       }
@@ -321,7 +342,7 @@ export class Multiplayer {
       this.broadcast({ t: 'sys', text: `${p.name} が退出しました` });
       this.game.chatSys(`${p.name} が退出しました`);
     }
-    if (this.isHost) this.status(`公開中: ルームコード ${this.code}（${this.playerCount} 人）`);
+    if (this.isHost) this.hostStatus();
     this.game.onNetChange();
   }
 
@@ -362,37 +383,86 @@ export class Multiplayer {
   }
 
   // ============ 参加者 ============
+  // まず直接つなぎ、だめなら中継サーバー経由でつなぐ
   join(code, name) {
-    if (this.active || this.peer) return;
+    if (this.active || this.session) return;
     code = String(code ?? '').trim().toUpperCase();
     if (!code) { this.status('ルームコードを入力してください'); return; }
     this.name = cleanName(name) || 'プレイヤー';
+    const session = {};
+    this.session = session;
     this.status('接続中...');
-    const peer = new Peer(undefined, peerOptions());
-    this.peer = peer;
-    const giveUp = setTimeout(() => {
-      if (this.peer === peer && !this.isClient) this.stop({ message: 'ホストに接続できませんでした。ルームコードとネットワークを確認してください' });
-    }, 20000);
-    peer.on('open', () => {
-      if (this.peer !== peer) return;
-      const conn = peer.connect(PREFIX + code, { reliable: true });
+    (async () => {
+      const ok = (directAllowed() && await this.tryDirect(code, session)) || await this.tryRelay(code, session);
+      if (this.session !== session || ok) return;
+      this.stop({ message: `ルーム ${code} に接続できませんでした。ルームコードと、ホストが公開中かを確認してください` });
+    })();
+  }
+
+  tryDirect(code, session) {
+    return new Promise((resolve) => {
+      const peer = new Peer(undefined, peerOptions());
+      this.peer = peer;
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (!ok && this.peer === peer) { this.peer = null; this.hostConn = null; peer.destroy(); }
+        resolve(ok);
+      };
+      const timer = setTimeout(() => done(false), 8000);
+      peer.on('open', async () => {
+        if (this.session !== session) { done(false); return; }
+        clearTimeout(timer);
+        const conn = peer.connect(PREFIX + code, { reliable: true });
+        this.hostConn = conn;
+        const ok = await this.waitWelcome(conn, session, 9000);
+        if (ok) this.via = 'direct';
+        done(ok);
+      });
+      peer.on('disconnected', () => { if (this.session === session && this.isClient && !peer.destroyed) peer.reconnect(); });
+      // 参加後のシグナリングサーバーのエラーは無視する (データは直接届く)
+      peer.on('error', () => { if (!this.isClient) done(false); });
+    });
+  }
+
+  async tryRelay(code, session) {
+    for (const url of brokerList()) {
+      if (this.session !== session) return false;
+      this.status('中継サーバー経由で接続中...');
+      let conn;
+      try { conn = await relayConnect(code, url); } catch { continue; }
+      if (this.session !== session) { conn.close(); return false; }
       this.hostConn = conn;
-      conn.on('open', () => conn.send({ t: 'hello', name: this.name }));
+      if (await this.waitWelcome(conn, session, 9000)) { this.via = 'relay'; return true; }
+      if (this.hostConn === conn) this.hostConn = null;
+      conn.close();
+    }
+    return false;
+  }
+
+  // hello を送り、ホストから welcome が届くのを待つ
+  waitWelcome(conn, session, ms) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => { if (!done) { done = true; clearTimeout(timer); resolve(ok); } };
+      const timer = setTimeout(() => finish(false), ms);
+      const hello = () => conn.send({ t: 'hello', name: this.name });
+      if (conn.open) hello();
+      else conn.on('open', hello);
       conn.on('data', (msg) => {
-        if (this.hostConn !== conn || !msg || typeof msg !== 'object') return;
-        if (msg.t === 'welcome') clearTimeout(giveUp);
+        if (this.session !== session || this.hostConn !== conn || !msg || typeof msg !== 'object') return;
+        if (msg.t === 'welcome') finish(true);
         try { this.onClientMessage(msg); } catch (e) { console.error('multiplayer', e); }
       });
-      conn.on('close', () => { if (this.hostConn === conn) this.hostLost(); });
-      conn.on('error', () => { if (this.hostConn === conn) this.hostLost(); });
-    });
-    peer.on('disconnected', () => { if (this.peer === peer && !peer.destroyed) peer.reconnect(); });
-    peer.on('error', (err) => {
-      if (this.peer !== peer) return;
-      // 参加後はシグナリングサーバーの一時的なエラーは無視する (データは直接届く)
-      if (this.isClient) return;
-      clearTimeout(giveUp);
-      this.stop({ message: `接続できませんでした: ${errorText(err)}` });
+      const lost = () => {
+        if (this.session !== session || this.hostConn !== conn) return;
+        if (this.isClient) this.hostLost();
+        else finish(false);
+      };
+      conn.on('close', lost);
+      conn.on('error', lost);
     });
   }
 
@@ -406,7 +476,7 @@ export class Multiplayer {
         this.code = msg.code;
         g.enterClientWorld(msg);
         this.syncPlayers(msg.players);
-        this.status(`参加中: ルームコード ${msg.code}`);
+        this.status(`参加中: ルームコード ${msg.code}（${this.hostConn?.relay ? '中継サーバー経由' : '直接接続'}）`);
         g.chatSys(`${msg.name} としてワールドに参加しました`);
         g.onNetChange();
         break;
@@ -464,7 +534,10 @@ export class Multiplayer {
   // ============ 共通 ============
   // graceful: 最後に送ったデータが届くよう、少し待ってから切断する
   stop({ graceful = false, message = '' } = {}) {
-    const peer = this.peer, hostConn = this.hostConn, conns = [...this.connIds.keys()];
+    const peer = this.peer, hostConn = this.hostConn, conns = [...this.connIds.keys()], relay = this.relayHost;
+    this.session = null;
+    this.relayHost = null;
+    this.via = '';
     this.peer = null;
     this.hostConn = null;
     this.connIds.clear();
@@ -480,6 +553,7 @@ export class Multiplayer {
       for (const c of conns) c.close();
       hostConn?.close();
       peer?.destroy();
+      relay?.stop();
     };
     if (graceful) setTimeout(close, 300);
     else close();

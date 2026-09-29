@@ -17,6 +17,7 @@ import { META } from './shapes.js';
 import { mulberry32 } from './noise.js';
 import { DAY_LENGTH } from './constants.js';
 import { Multiplayer, cleanName } from './multiplayer.js';
+import qrcode from 'qrcode-generator';
 
 const SAVE_KEY = 'mycra:save:v2';
 const LEGACY_SAVE_KEY = 'mycra:save:v1';
@@ -1524,13 +1525,16 @@ const MP_HINT = 'ルームコードを伝えると、友だちが同じ世界に
 
 function updateNetUI() {
   const active = net.active;
-  const busy = !!net.peer && !active;
+  const busy = net.busy;
   $('mp-idle').classList.toggle('hidden', active);
   $('mp-active').classList.toggle('hidden', !active);
   $('mp-host').disabled = busy;
   $('mp-join').disabled = busy;
   nameInput.disabled = active || busy;
-  $('mp-link').value = active ? net.inviteUrl() : '';
+  const link = active ? net.inviteUrl() : '';
+  if ($('mp-link').value !== link) { $('mp-link').value = link; drawQr(link); }
+  $('mp-invite').classList.toggle('hidden', !net.isHost);
+  $('mp-code-big').textContent = net.isHost ? net.code : '';
   $('mp-leave').textContent = net.isHost ? '公開を終了' : '退出する';
   $('mp-status').textContent = net.statusText || MP_HINT;
   const names = [`${net.name}（あなた）`, ...[...net.views.values()].map((v) => v.name)];
@@ -1542,6 +1546,28 @@ function updateNetUI() {
   if (!active && chatOpen) closeChat(false);
 }
 net.onStatus = () => updateNetUI();
+
+// 招待リンクの QR コード (ほかの端末のカメラで読み取って参加する)
+function drawQr(text) {
+  const cv = $('mp-qr');
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!text) return;
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount();
+  const cell = Math.floor((cv.width - 16) / n);
+  const off = Math.floor((cv.width - cell * n) / 2);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect(off + c * cell, off + r * cell, cell, cell);
+}
+
+$('mp-open').addEventListener('click', () => {
+  $('mp').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  (nameInput.value ? (net.active ? $('mp-copy') : $('mp-host')) : nameInput).focus({ preventScroll: true });
+});
 
 $('mp-host').addEventListener('click', () => { save(); net.host(myName()); });
 $('mp-join').addEventListener('click', () => { save(); net.join(codeInput.value, myName()); });
@@ -1571,6 +1597,7 @@ const inviteCode = new URLSearchParams(location.search).get('join');
 if (inviteCode) {
   codeInput.value = inviteCode.toUpperCase();
   net.join(inviteCode, myName());
+  setTimeout(() => $('mp').scrollIntoView({ block: 'center' }), 100);
 }
 
 // デバッグ / 自動テスト用フック
