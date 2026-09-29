@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>MyCra - ブラウザで遊べるボクセルワールド</title>
+    <meta name="theme-color" content="#5aaee0" />
+    <meta name="apple-mobile-web-app-title" content="MyCra" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="application-name" content="MyCra" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
+    <script type="module" crossorigin src="/mycra/assets/index-D7gkCOIY.js"></script>
+    <link rel="stylesheet" crossorigin href="/mycra/assets/index-ClKTX4qJ.css">
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <div id="hud">
+      <div id="crosshair"></div>
+      <div id="damage"></div>
+      <div id="info" class="hidden"></div>
+      <div id="bottom">
+        <div id="item-name"></div>
+        <div id="stats">
+          <div class="stat-col">
+            <div id="armor" class="stat-row"></div>
+            <div id="hearts" class="stat-row"></div>
+          </div>
+          <div id="hunger" class="stat-row"></div>
+        </div>
+        <div id="hotbar"></div>
+      </div>
+      <div id="toast"></div>
+    </div>
+
+    <!-- チャット (マルチプレイ) -->
+    <div id="chat">
+      <div id="chat-log"></div>
+      <form id="chat-form" autocomplete="off">
+        <input id="chat-input" maxlength="200" placeholder="メッセージを入力" enterkeyhint="send" />
+        <button type="submit">送信</button>
+        <button type="button" id="chat-close" aria-label="閉じる">✕</button>
+      </form>
+    </div>
+
+    <!-- タッチ操作 UI (タブレット / スマートフォン) -->
+    <div id="touch" class="hidden">
+      <div id="touch-surface"></div>
+      <div id="joystick"><div id="joystick-knob"></div></div>
+      <div id="touch-top">
+        <button id="btn-chat" class="tbtn hidden" aria-label="チャット">💬</button>
+        <button id="btn-inv" class="tbtn" aria-label="持ち物">⋯</button>
+        <button id="btn-menu" class="tbtn" aria-label="メニュー">☰</button>
+      </div>
+      <div id="touch-right">
+        <div class="trow">
+          <button id="btn-sneak" class="tbtn round" aria-label="スニーク">⇩</button>
+          <button id="btn-jump" class="tbtn round big" aria-label="ジャンプ">▲</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- インベントリ / クラフト画面 -->
+    <div id="inv-screen" class="hidden">
+      <div id="inv-panel">
+        <div id="inv-left-col">
+          <h2 id="inv-title">クラフト</h2>
+          <div id="inv-tools"></div>
+          <div id="inv-left"></div>
+        </div>
+        <div id="inv-right-col">
+          <h2>防具</h2>
+          <div id="inv-armor" class="igrid armor-row"></div>
+          <h2>持ち物</h2>
+          <div id="inv-main" class="igrid"></div>
+          <div id="inv-hotbar" class="igrid"></div>
+          <button id="inv-close" class="secondary">閉じる (E)</button>
+        </div>
+      </div>
+      <div id="inv-cursor" class="hidden"><canvas></canvas><span class="count"></span></div>
+      <div id="inv-tip" class="hidden"></div>
+    </div>
+
+    <!-- 死亡画面 -->
+    <div id="death" class="hidden">
+      <div class="panel">
+        <h1>死んでしまった！</h1>
+        <p id="death-cause">スコア: 0</p>
+        <button id="respawn">リスポーン</button>
+      </div>
+    </div>
+
+    <div id="overlay">
+      <div class="panel">
+        <h1>MyCra</h1>
+        <p class="sub">ブラウザで動く Minecraft 風ボクセルワールド</p>
+        <button id="start">クリックして開始</button>
+        <div><button id="mp-open" class="secondary">👥 みんなで遊ぶ（別の端末と同時プレイ）</button></div>
+        <div class="controls" id="controls-desktop">
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動　<kbd>マウス</kbd> 視点　<kbd>Space</kbd> ジャンプ</div>
+          <div><kbd>Shift</kbd> スニーク　<kbd>Ctrl</kbd> / <kbd>W</kbd> 二度押し ダッシュ</div>
+          <div><kbd>左クリック</kbd> 長押しで壊す / 攻撃　<kbd>右クリック</kbd> 置く / 使う (ドアの開閉・ベッド・チェスト) / 食べる / 弓を引く</div>
+          <div><kbd>ホイールクリック</kbd> ブロック選択　<kbd>Q</kbd> 捨てる　<kbd>E</kbd> 持ち物・クラフト</div>
+          <div><kbd>1</kbd>〜<kbd>9</kbd> / <kbd>ホイール</kbd> ホットバー　<kbd>F5</kbd> 視点切替　<kbd>F3</kbd> デバッグ　<kbd>F1</kbd> HUD</div>
+          <div>クリエイティブ: <kbd>Space</kbd> 二度押しで飛行 (<kbd>Space</kbd> 上昇 / <kbd>Shift</kbd> 下降)</div>
+          <div><kbd>T</kbd> チャット (マルチプレイ中)　<kbd>Esc</kbd> メニューに戻る</div>
+        </div>
+        <div class="controls" id="controls-touch">
+          <div><b>画面左</b> をなぞって移動（外側までなぞるとダッシュ）　<b>画面右</b> をなぞって視点</div>
+          <div>ブロックを <b>タップ</b> で置く / 使う / 攻撃　<b>長押し</b> で壊す（指の下のブロックが対象）</div>
+          <div><b>▲</b> ジャンプ（クリエイティブでは二度押しで飛行）　<b>⇩</b> スニーク切替（飛行中は下降）</div>
+          <div><b>⋯</b> 持ち物・クラフト　<b>💬</b> チャット（マルチプレイ中）　下のバーをタップして選択</div>
+        </div>
+        <div class="settings">
+          <div class="setting">
+            <div class="label">ゲームモード</div>
+            <div class="seg">
+              <button data-mode="survival">サバイバル</button>
+              <button data-mode="creative">クリエイティブ</button>
+              <button data-mode="adventure">アドベンチャー</button>
+              <button data-mode="spectator">スペクテイター</button>
+            </div>
+            <p class="desc" id="mode-desc"></p>
+          </div>
+          <div class="setting">
+            <div class="label">難易度</div>
+            <div class="seg">
+              <button data-diff="peaceful">ピースフル</button>
+              <button data-diff="easy">イージー</button>
+              <button data-diff="normal">ノーマル</button>
+              <button data-diff="hard">ハード</button>
+            </div>
+            <p class="desc" id="diff-desc"></p>
+          </div>
+          <div class="setting" id="mp">
+            <div class="label">マルチプレイ（みんなで遊ぶ）</div>
+            <div class="mp-row">
+              <input id="mp-name" maxlength="16" placeholder="あなたの名前" autocomplete="off" />
+            </div>
+            <div class="mp-row" id="mp-idle">
+              <button id="mp-host" class="secondary">この世界を公開する</button>
+              <span class="mp-or">または</span>
+              <input id="mp-code" maxlength="6" placeholder="ルームコード" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+              <button id="mp-join" class="secondary">参加する</button>
+            </div>
+            <div class="hidden" id="mp-active">
+              <div class="mp-invite" id="mp-invite">
+                <canvas id="mp-qr" width="164" height="164" aria-label="招待リンクの QR コード"></canvas>
+                <div class="mp-invite-text">
+                  <div class="mp-code-big" id="mp-code-big"></div>
+                  <p>ほかの端末でこの QR コードをカメラで読み取るか、ルームコードを入力すると参加できます。</p>
+                </div>
+              </div>
+              <div class="mp-row">
+                <input id="mp-link" readonly aria-label="招待リンク" />
+                <button id="mp-copy" class="secondary">招待リンクをコピー</button>
+                <button id="mp-leave" class="secondary danger">退出する</button>
+              </div>
+            </div>
+            <p class="desc" id="mp-status"></p>
+            <p class="desc" id="mp-players"></p>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="save" class="secondary">セーブ</button>
+          <button id="newworld" class="secondary">新しい世界を生成</button>
+          <button id="reset" class="secondary danger">セーブデータを削除</button>
+        </div>
+        <p class="note">セーブデータはこのブラウザ内 (localStorage) に保存されます。10秒ごとに自動セーブされます。</p>
+      </div>
+    </div>
+
+  </body>
+</html>
