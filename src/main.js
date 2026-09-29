@@ -16,6 +16,7 @@ import { blockIntersectsEntity, cellsTouching } from './physics.js';
 import { META } from './shapes.js';
 import { mulberry32 } from './noise.js';
 import { DAY_LENGTH } from './constants.js';
+import { Multiplayer, cleanName } from './multiplayer.js';
 
 const SAVE_KEY = 'mycra:save:v2';
 const LEGACY_SAVE_KEY = 'mycra:save:v1';
@@ -105,14 +106,34 @@ const primedTnt = [];
 let modelAnim = 0;
 let fps = 0, frames = 0, fpsTime = 0;
 let spawnRand = mulberry32(1);
+let chatOpen = false;
+let pendingContainer = null; // 参加者: ホストに中身を問い合わせ中のチェスト
 
 const hud = new HUD({
   hearts: $('hearts'), hunger: $('hunger'), armor: $('armor'), hotbar: $('hotbar'), info: $('info'),
   itemName: $('item-name'), stats: $('stats'), damage: $('damage'), toast: $('toast'),
 });
 
+// ---------- マルチプレイ ----------
+const net = new Multiplayer({
+  get scene() { return scene; },
+  get world() { return world; },
+  get player() { return player; },
+  get mobs() { return mobs; },
+  get drops() { return drops; },
+  get inventory() { return inventory; },
+  get timeOfDay() { return timeOfDay; },
+  set timeOfDay(v) { timeOfDay = v; },
+  hud,
+  onNetChange: () => updateNetUI(),
+  chat: (name, text) => addChat(`<${name}> ${text}`),
+  chatSys: (text) => addChat(text, true),
+  applyRemoteBlocks, igniteTnt, remoteIgnite, getContainer, setContainer, onContainerData, skipNight,
+  enterClientWorld, leaveClientWorld, setDifficultyFromHost, refreshInventory, playerData,
+});
+
 function playing() {
-  return (locked || touchPlaying) && !screen.open && !player.dead;
+  return (locked || touchPlaying) && !screen.open && !player.dead && !chatOpen;
 }
 
 // ---------- セーブ / ロード ----------
@@ -127,6 +148,13 @@ function loadSave() {
 
 function save(showToast = false) {
   if (!world) return;
+  // 参加中は自分の世界ではないので、持ち物などをホストに預ける
+  if (net.isClient) {
+    net.sendPdata();
+    if (showToast) hud.toast('ホストに保存しました');
+    lastSave = performance.now();
+    return;
+  }
   const data = {
     version: 2,
     seed: world.seed,
@@ -141,6 +169,7 @@ function save(showToast = false) {
     timeOfDay,
     mobs: mobs.serialize(),
     drops: drops.serialize(),
+    players: net.pdata,
     savedAt: Date.now(),
   };
   try {
@@ -162,6 +191,7 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
   world = new World(seed);
   world.generate();
   if (saveData?.edits) world.applyEdits(saveData.edits);
+  world.onChange = (x, y, z, id, meta) => net.blockChanged(x, y, z, id, meta);
   for (const [k, slots] of saveData?.containers ?? []) world.containers.set(k, loadSlots(slots, CONTAINER_SIZE));
   for (const t of primedTnt) scene.remove(t.mesh);
   primedTnt.length = 0;
@@ -175,7 +205,9 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
   drops = new DropManager(world, scene);
   mobs = new MobManager(world, scene);
   mobs.onPlayerHurt = () => hud.flashDamage();
+  mobs.onArrow = (from, velocity) => net.arrowFired(from, velocity);
   mobs.difficulty = player.difficulty;
+  if (!net.isClient) net.pdata = saveData?.players ?? {};
   spawnRand = mulberry32(seed + 77);
   if (touch) touch.player = player;
   screen.inv = inventory;
@@ -245,10 +277,12 @@ function setGameMode(mode) {
 }
 
 function setDifficulty(diff) {
+  if (net.isClient) { hud.toast('難易度はホストが決めます'); return; }
   player.difficulty = diff;
   mobs.difficulty = diff;
   updateModeUI();
   hud.toast(`難易度: ${DIFFICULTIES[diff]}`);
+  if (net.isHost) net.broadcast({ t: 'time', time: timeOfDay, difficulty: diff });
 }
 
 // ---------- 入力 ----------
@@ -289,7 +323,7 @@ document.addEventListener('pointerlockchange', () => {
     touchPlaying = false;
     touch.setEnabled(false);
     overlay.classList.add('hidden');
-  } else if (!touchPlaying && !screen.open && !player.dead) {
+  } else if (!touchPlaying && !screen.open && !player.dead && !chatOpen) {
     overlay.classList.remove('hidden');
     player.keys.clear();
     stopMining();
@@ -333,6 +367,9 @@ document.addEventListener('keydown', (e) => {
       if (touchPlaying) showMenu();
       break;
     case 'Tab': e.preventDefault(); break;
+    case 'KeyT':
+      if (net.active) { e.preventDefault(); openChat(); }
+      break;
   }
 });
 
@@ -368,9 +405,11 @@ $('save').addEventListener('click', () => save(true));
 for (const el of document.querySelectorAll('[data-mode]')) el.addEventListener('click', () => setGameMode(el.dataset.mode));
 for (const el of document.querySelectorAll('[data-diff]')) el.addEventListener('click', () => setDifficulty(el.dataset.diff));
 $('newworld').addEventListener('click', () => {
+  if (net.active) { hud.toast('マルチプレイ中はできません'); return; }
   if (confirm('現在の世界を破棄して新しい世界を生成しますか？')) newWorld();
 });
 $('reset').addEventListener('click', () => {
+  if (net.active) { hud.toast('マルチプレイ中はできません'); return; }
   if (confirm('セーブデータを削除して最初からやり直しますか？')) {
     localStorage.removeItem(SAVE_KEY);
     localStorage.removeItem(LEGACY_SAVE_KEY);
@@ -425,7 +464,7 @@ screen = new InventoryScreen($('inv-screen'), null, {
   onClose: () => closeInventory(),
   getStations: () => nearbyStations(),
   onDropStack: (stack) => dropStack(stack),
-  onChange: () => { hud.renderHotbar(inventory); updateArmor(); },
+  onChange: () => { hud.renderHotbar(inventory); updateArmor(); syncOpenContainer(); },
 });
 
 function openInventory() {
@@ -443,9 +482,57 @@ function showScreen(mode, container = null) {
 
 function openContainer(hit) {
   const key = `${hit.x},${hit.y},${hit.z}`;
+  // 参加者はホストに中身を問い合わせてから開く
+  if (net.isClient) {
+    pendingContainer = { key, title: BLOCKS[hit.id].label };
+    net.sendHost({ t: 'getContainer', key });
+    return;
+  }
+  showScreen('container', { title: BLOCKS[hit.id].label, slots: getContainer(key), key });
+}
+
+function getContainer(key) {
   let slots = world.containers.get(key);
-  if (!slots) { slots = new Array(CONTAINER_SIZE).fill(null); world.containers.set(key, slots); }
-  showScreen('container', { title: BLOCKS[hit.id].label, slots });
+  if (!slots) {
+    slots = new Array(CONTAINER_SIZE).fill(null);
+    const [x, y, z] = key.split(',').map(Number);
+    if (BLOCKS[world.get(x, y, z)]?.container) world.containers.set(key, slots);
+  }
+  return slots;
+}
+
+// 他のプレイヤーがチェストの中身を変えた (開いている画面にもすぐ反映する)
+function setContainer(key, slots) {
+  const [x, y, z] = key.split(',').map(Number);
+  if (!BLOCKS[world.get(x, y, z)]?.container) return;
+  replaceContainer(key, slots);
+}
+
+function replaceContainer(key, slots) {
+  let cur = world.containers.get(key);
+  if (cur) cur.splice(0, cur.length, ...slots);
+  else { cur = slots; world.containers.set(key, cur); }
+  if (screen.open && screen.container?.slots === cur) screen.render();
+  return cur;
+}
+
+// 参加者: ホストからチェストの中身が届いた
+function onContainerData(key, slots) {
+  const cur = replaceContainer(key, slots);
+  if (pendingContainer?.key === key) {
+    const { title } = pendingContainer;
+    pendingContainer = null;
+    if (!screen.open && !player.dead) showScreen('container', { title, slots: cur, key });
+  }
+}
+
+// 開いているチェストの変更を他のプレイヤーに知らせる
+function syncOpenContainer() {
+  const c = screen.container;
+  if (!net.active || screen.mode !== 'container' || !c?.key) return;
+  const msg = { t: 'container', key: c.key, slots: serializeSlots(c.slots) };
+  if (net.isClient) net.sendHost(msg);
+  else net.broadcast(msg);
 }
 
 function updateArmor() {
@@ -537,16 +624,40 @@ function mobTarget() {
   return hit.mob;
 }
 
-// 左クリック: モブがいれば攻撃 (true を返す)
+// 視線の先にいる他のプレイヤー { id, distance }
+function playerTarget() {
+  if (!net.active) return null;
+  player.eyePosition(eye);
+  aimDirection();
+  const hit = net.raycastPlayers(eye, dir, ATTACK_REACH);
+  if (!hit) return null;
+  const block = raycastVoxel(world, eye, dir, hit.distance);
+  if (block && block.distance < hit.distance) return null;
+  return hit;
+}
+
+// 左クリック: モブ (または他のプレイヤー) がいれば攻撃 (true を返す)
 function attack() {
   if (player.spectator || player.attackCooldown > 0) return false;
-  const mob = mobTarget();
-  if (!mob) return false;
+  let mob = mobTarget();
+  const other = playerTarget();
+  if (other && mob && mob.position.distanceTo(eye) < other.distance) mob = null;
+  if (!mob && !other) return false;
   hand.swing();
   const item = inventory.selectedItem;
   const def = item ? ITEMS[item.id] : null;
   const dmg = def?.damage ?? 1;
-  mob.damage(dmg, player.position);
+  if (!mob) {
+    // 他のプレイヤーを攻撃 (PvP)
+    const v = net.views.get(other.id);
+    const dx = v.position.x - player.position.x, dz = v.position.z - player.position.z;
+    const l = Math.hypot(dx, dz) || 1;
+    net.hitPlayer(other.id, dmg, { x: (dx / l) * 5, z: (dz / l) * 5 });
+  } else if (net.isClient) {
+    net.sendHost({ t: 'hitMob', id: mob.id, dmg, fx: player.position.x, fz: player.position.z });
+  } else {
+    mob.damage(dmg, player.position);
+  }
   player.attackCooldown = 0.6;
   player.exhaustion += 0.1;
   if (def?.maxDamage && def.tool && player.consumesItems) {
@@ -668,7 +779,8 @@ function removeBlock(x, y, z, withDrops, stack = null) {
   const key = `${x},${y},${z}`;
   const cont = world.containers.get(key);
   if (cont) {
-    drops.spawnStacks(cont.filter(Boolean), x + 0.5, y + 0.5, z + 0.5);
+    // 参加者の場合、中身はホストが落とす
+    if (!net.isClient) drops.spawnStacks(cont.filter(Boolean), x + 0.5, y + 0.5, z + 0.5);
     world.containers.delete(key);
     if (screen.open && screen.container?.slots === cont) closeInventory();
   }
@@ -819,6 +931,7 @@ function placeBlock(hit, id) {
   if (def.solid) {
     if (!player.spectator && blockIntersectsEntity(world, x, y, z, id, meta, player)) return false;
     for (const m of mobs.mobs) if (!m.dead && blockIntersectsEntity(world, x, y, z, id, meta, m)) return false;
+    for (const v of net.views.values()) if (!v.dead && v.mode !== 'spectator' && blockIntersectsEntity(world, x, y, z, id, meta, v)) return false;
   }
   if (def.support && !isSupported(x, y, z, id, meta)) return false;
   if (def.shape === 'door') {
@@ -833,7 +946,7 @@ function placeBlock(hit, id) {
   } else {
     world.set(x, y, z, id, meta);
   }
-  if (def.container) world.containers.set(`${x},${y},${z}`, new Array(CONTAINER_SIZE).fill(null));
+  if (def.container && !net.isClient) world.containers.set(`${x},${y},${z}`, new Array(CONTAINER_SIZE).fill(null));
   if (def.powderTo) hardenPowder(x, y, z);
   consumeHeld();
   return true;
@@ -869,19 +982,31 @@ function sleepInBed(hit) {
   }
   const monster = mobs.mobs.some((mb) => mb.def.hostile && !mb.dead && mb.position.distanceTo(player.position) < 8);
   if (monster) { hud.toast('近くにモンスターがいるので、今は休むことができません'); return; }
+  // マルチプレイでは全員が眠ると朝になる
+  if (net.active) { net.requestSleep(); hud.toast('ベッドで休んでいます'); return; }
+  skipNight();
+}
+
+function skipNight() {
   timeOfDay = 0.26;
   hud.toast('朝になりました');
   save();
 }
 
-// TNT に火をつける
-function igniteTnt(x, y, z, fuse = 4) {
-  world.set(x, y, z, BLOCK.AIR);
+// TNT に火をつける (visual: 参加者側の見た目だけ。爆発はホストが起こす)
+function igniteTnt(x, y, z, fuse = 4, visual = false) {
+  if (net.isClient && !visual) { net.sendHost({ t: 'ignite', x, y, z }); return; }
+  if (!visual) world.set(x, y, z, BLOCK.AIR);
   const mesh = buildItemMesh('tnt');
   mesh.material = mesh.material.clone();
   mesh.position.set(x + 0.5, y + 0.5, z + 0.5);
   scene.add(mesh);
-  primedTnt.push({ x: x + 0.5, y: y + 0.5, z: z + 0.5, fuse, mesh });
+  primedTnt.push({ x: x + 0.5, y: y + 0.5, z: z + 0.5, fuse, mesh, visual });
+  if (!visual) net.tntPrimed(x, y, z, fuse);
+}
+
+function remoteIgnite(x, y, z) {
+  if (BLOCKS[world.get(x, y, z)]?.tnt) igniteTnt(x, y, z);
 }
 
 function updateTnt(dt) {
@@ -892,7 +1017,7 @@ function updateTnt(dt) {
     if (t.fuse <= 0) {
       scene.remove(t.mesh);
       primedTnt.splice(i, 1);
-      explode(t.x, t.y, t.z, 4);
+      if (!t.visual) explode(t.x, t.y, t.z, 4);
     }
   }
 }
@@ -908,14 +1033,15 @@ function explode(cx, cy, cz, power, source = null) {
     if (Math.random() < 1 / power) spawnBlockDrops(def, meta, x, y, z, null);
   });
   const center = new THREE.Vector3(cx, cy, cz);
-  const d = player.position.clone().add(new THREE.Vector3(0, 0.9, 0)).distanceTo(center);
   const r = power * 2;
-  if (d < r) {
+  for (const target of net.targets()) {
+    const d = target.position.clone().add(new THREE.Vector3(0, 0.9, 0)).distanceTo(center);
+    if (d >= r) continue;
     const impact = 1 - d / r;
     const dmg = Math.floor(((impact * impact + impact) / 2) * 7 * r + 1);
-    const dx = player.position.x - cx, dz = player.position.z - cz;
+    const dx = target.position.x - cx, dz = target.position.z - cz;
     const l = Math.hypot(dx, dz) || 1;
-    if (player.damage(dmg, { x: (dx / l) * 10 * impact, z: (dz / l) * 10 * impact }, true)) hud.flashDamage();
+    if (target.damage(dmg, { x: (dx / l) * 10 * impact, z: (dz / l) * 10 * impact }, true) && target === player) hud.flashDamage();
   }
   mobs.blast(cx, cy, cz, power, source);
 }
@@ -962,7 +1088,14 @@ function releaseBow(power = null) {
   player.eyePosition(eye);
   aimDirection();
   const from = eye.clone().addScaledVector(dir, 0.6);
-  mobs.addArrow(from, dir.clone().multiplyScalar(60 * p), 'player', 6 * p, player.consumesItems);
+  const velocity = dir.clone().multiplyScalar(60 * p);
+  if (net.isClient) {
+    // 当たり判定はホストが行う。手元では見た目だけの矢を飛ばす
+    mobs.addArrow(from, velocity, 'visual', 0);
+    net.sendHost({ t: 'shoot', x: from.x, y: from.y, z: from.z, vx: velocity.x, vy: velocity.y, vz: velocity.z, dmg: 6 * p, pickup: player.consumesItems });
+  } else {
+    mobs.addArrow(from, velocity, 'player', 6 * p, player.consumesItems);
+  }
   if (player.consumesItems && inventory.damageSelected(1)) toolBroke(ITEMS.bow);
   hand.swing();
   hud.renderHotbar(inventory);
@@ -1082,7 +1215,7 @@ function updateEnvironment(dt) {
     if (player.onGround && !player.sneaking && BLOCKS[below]?.name === 'magma_block') player.damage(1) && hud.flashDamage();
   }
   saplingTimer += dt;
-  if (saplingTimer >= 5) {
+  if (saplingTimer >= 5 && !net.isClient) {
     saplingTimer = 0;
     for (const key of [...world.saplings]) {
       if (Math.random() > 0.06) continue;
@@ -1137,6 +1270,29 @@ function updateCamera() {
 // ---------- メインループ ----------
 let last = performance.now();
 
+// 世界の時間を進める (TNT・昼夜・モブ・アイテム・通信)
+function updateShared(dt, active) {
+  updateTnt(dt);
+  updateSky(dt);
+  mobs.update(dt, net.targets(), daylight, {
+    drops,
+    onPlayerHurt: () => hud.flashDamage(),
+    explode: (x, y, z, power, source) => explode(x, y, z, power, source),
+  });
+  drops.update(dt, active && !player.spectator ? player : null, inventory, () => { hud.renderHotbar(inventory); if (!hand.item && inventory.selectedItem) hand.setItem(inventory.selectedItem.id); });
+  net.update(dt);
+}
+
+// マルチプレイ中にタブが裏に回ると描画が止まるので、タイマーで世界を進め続ける
+let lastBackground = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  const dt = Math.min((now - lastBackground) / 1000, 2);
+  lastBackground = now;
+  if (!document.hidden || !net.active || !world) return;
+  for (let t = dt; t > 0.001; t -= 0.05) updateShared(Math.min(0.05, t), false);
+}, 250);
+
 function loop(now) {
   requestAnimationFrame(loop);
   const dt = Math.min((now - last) / 1000, 0.05);
@@ -1152,15 +1308,8 @@ function loop(now) {
   } else if (player.dead && deathEl.classList.contains('hidden')) {
     onDeath();
   }
-  updateTnt(dt);
   world.update(3);
-  updateSky(dt);
-  mobs.update(dt, player, daylight, {
-    drops,
-    onPlayerHurt: () => hud.flashDamage(),
-    explode: (x, y, z, power, source) => explode(x, y, z, power, source),
-  });
-  drops.update(dt, active && !player.spectator ? player : null, inventory, () => { hud.renderHotbar(inventory); if (!hand.item && inventory.selectedItem) hand.setItem(inventory.selectedItem.id); });
+  updateShared(dt, active);
   if (player.dead && deathEl.classList.contains('hidden')) onDeath();
 
   updateCamera();
@@ -1240,10 +1389,189 @@ function onDeath() {
   save();
 }
 
+// ---------- マルチプレイ: 世界の出入り ----------
+// 他のプレイヤーのブロック変更を反映する
+function applyRemoteBlocks(list) {
+  if (!Array.isArray(list)) return;
+  const valid = list.filter((e) => Array.isArray(e) && e.length >= 4 && world.inBounds(e[0], e[1], e[2]) && BLOCKS[e[3]]);
+  for (const [x, y, z, id] of valid) {
+    const key = `${x},${y},${z}`;
+    const cont = world.containers.get(key);
+    if (cont && !BLOCKS[id].container) {
+      // チェストが壊された: 中身はホストが落とす
+      if (!net.isClient) drops.spawnStacks(cont.filter(Boolean), x + 0.5, y + 0.5, z + 0.5);
+      world.containers.delete(key);
+      if (screen.open && screen.container?.slots === cont) closeInventory();
+    } else if (!cont && BLOCKS[id].container && !net.isClient) {
+      world.containers.set(key, new Array(CONTAINER_SIZE).fill(null));
+    }
+  }
+  world.applyRemote(valid);
+}
+
+// ホストや参加者に預ける自分のデータ
+function playerData() {
+  return {
+    player: {
+      x: player.position.x, y: player.position.y, z: player.position.z, yaw: player.yaw, pitch: player.pitch,
+      flying: player.flying, gameMode: player.gameMode, health: player.health, hunger: player.hunger, spawnPoint: player.spawnPoint,
+    },
+    inventory: inventory.serialize(),
+  };
+}
+
+// 参加者: ホストの世界に入る
+function enterClientWorld(msg) {
+  pendingContainer = null;
+  if (screen.open) screen.hide();
+  deathEl.classList.add('hidden');
+  const pd = msg.pdata;
+  const pos = pd?.player;
+  const valid = pos && [pos.x, pos.y, pos.z].every(Number.isFinite);
+  createWorld(msg.seed, {
+    edits: msg.edits, mobs: [], drops: [], timeOfDay: msg.timeOfDay,
+    player: valid ? pos : null, inventory: valid ? pd.inventory : null,
+  }, player.gameMode);
+  mobs.remote = true;
+  drops.remote = true;
+  drops.onRequestSpawn = (d) => net.sendHost({ t: 'spawnDrop', ...d });
+  setDifficultyFromHost(msg.difficulty);
+  touch.setFlying(player.flying);
+  hud.toast('ワールドに参加しました');
+}
+
+// 参加者: 自分の世界に戻る
+function leaveClientWorld() {
+  pendingContainer = null;
+  if (screen.open) screen.hide();
+  deathEl.classList.add('hidden');
+  const s = loadSave();
+  createWorld(s?.seed ?? DEFAULT_SEED, s, player.gameMode);
+  touch.setFlying(player.flying);
+  hud.toast('自分の世界に戻りました');
+}
+
+function setDifficultyFromHost(diff) {
+  if (!DIFFICULTIES[diff] || player.difficulty === diff) return;
+  player.difficulty = diff;
+  mobs.difficulty = diff;
+  updateModeUI();
+}
+
+function refreshInventory() {
+  hud.renderHotbar(inventory);
+  updateArmor();
+  if (screen.open) screen.render();
+  if (!hand.item && inventory.selectedItem) hand.setItem(inventory.selectedItem.id);
+}
+
+// ---------- チャット ----------
+const chatEl = $('chat');
+const chatLog = $('chat-log');
+const chatInput = $('chat-input');
+
+function addChat(text, system = false) {
+  const line = document.createElement('div');
+  line.className = system ? 'line sys' : 'line';
+  line.textContent = text;
+  chatLog.appendChild(line);
+  while (chatLog.children.length > 50) chatLog.firstChild.remove();
+  setTimeout(() => line.classList.add('old'), 10000);
+}
+
+function openChat() {
+  if (!net.active || chatOpen || player.dead) return;
+  chatOpen = true;
+  player.keys.clear();
+  stopMining();
+  useHeld = false;
+  chatEl.classList.add('open');
+  chatInput.value = '';
+  chatInput.focus();
+  if (locked) document.exitPointerLock();
+}
+
+function closeChat(send) {
+  if (!chatOpen) return;
+  if (send) net.chatSend(chatInput.value);
+  chatOpen = false;
+  chatEl.classList.remove('open');
+  chatInput.blur();
+  if (!touchPlaying && !locked && overlay.classList.contains('hidden')) start();
+}
+
+$('chat-form').addEventListener('submit', (e) => { e.preventDefault(); closeChat(true); });
+chatInput.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.key === 'Escape') { e.preventDefault(); closeChat(false); }
+});
+$('chat-close').addEventListener('click', () => closeChat(false));
+$('btn-chat').addEventListener('click', () => { if (touchPlaying) openChat(); });
+
+// ---------- マルチプレイのメニュー ----------
+const nameInput = $('mp-name');
+const codeInput = $('mp-code');
+try { nameInput.value = localStorage.getItem('mycra:name') ?? ''; } catch { /* 保存できない環境 */ }
+
+function myName() {
+  let name = cleanName(nameInput.value);
+  if (!name) { name = `Steve${100 + Math.floor(Math.random() * 900)}`; nameInput.value = name; }
+  try { localStorage.setItem('mycra:name', name); } catch { /* 保存できない環境 */ }
+  return name;
+}
+
+const MP_HINT = 'ルームコードを伝えると、友だちが同じ世界に参加できます（ホストはこの画面を開いたままにしてください）';
+
+function updateNetUI() {
+  const active = net.active;
+  const busy = !!net.peer && !active;
+  $('mp-idle').classList.toggle('hidden', active);
+  $('mp-active').classList.toggle('hidden', !active);
+  $('mp-host').disabled = busy;
+  $('mp-join').disabled = busy;
+  nameInput.disabled = active || busy;
+  $('mp-link').value = active ? net.inviteUrl() : '';
+  $('mp-leave').textContent = net.isHost ? '公開を終了' : '退出する';
+  $('mp-status').textContent = net.statusText || MP_HINT;
+  const names = [`${net.name}（あなた）`, ...[...net.views.values()].map((v) => v.name)];
+  $('mp-players').textContent = active ? `参加者 ${names.length} 人: ${names.join('、')}` : '';
+  for (const el of document.querySelectorAll('[data-diff]')) el.disabled = net.isClient;
+  $('newworld').disabled = active;
+  $('reset').disabled = active;
+  $('btn-chat').classList.toggle('hidden', !active);
+  if (!active && chatOpen) closeChat(false);
+}
+net.onStatus = () => updateNetUI();
+
+$('mp-host').addEventListener('click', () => { save(); net.host(myName()); });
+$('mp-join').addEventListener('click', () => { save(); net.join(codeInput.value, myName()); });
+codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('mp-join').click(); } });
+codeInput.addEventListener('input', () => { codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
+$('mp-leave').addEventListener('click', () => net.leave());
+$('mp-copy').addEventListener('click', async () => {
+  const url = net.inviteUrl();
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    $('mp-link').select();
+    document.execCommand?.('copy');
+  }
+  $('mp-status').textContent = '招待リンクをコピーしました。友だちに送ってください';
+});
+window.addEventListener('pagehide', () => { if (net.isClient) net.sendPdata(); });
+
 // ---------- 起動 ----------
 const saved = loadSave();
 createWorld(saved?.seed ?? DEFAULT_SEED, saved, 'survival');
+updateNetUI();
 requestAnimationFrame(loop);
+
+// 招待リンク (?join=コード) から開いたら自動で参加する
+const inviteCode = new URLSearchParams(location.search).get('join');
+if (inviteCode) {
+  codeInput.value = inviteCode.toUpperCase();
+  net.join(inviteCode, myName());
+}
 
 // デバッグ / 自動テスト用フック
 window.__mycra = {
@@ -1265,6 +1593,8 @@ window.__mycra = {
   set timeOfDay(v) { timeOfDay = v; },
   blockTarget, mobTarget, attack, startMining, stopMining, use, placeBlock, pickBlock, save, selectSlot,
   startTouchPlay, showMenu, openInventory, closeInventory, breakBlockAt, eatNow, setGameMode, setDifficulty,
-  removeBlock, explode, igniteTnt, releaseBow, openContainer, updateArmor,
+  removeBlock, explode, igniteTnt, releaseBow, openContainer, updateArmor, net, openChat, closeChat,
+  blockId,
+  get primedTnt() { return primedTnt; },
   set thirdPerson(v) { thirdPerson = v; },
 };

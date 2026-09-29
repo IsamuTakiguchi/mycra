@@ -92,14 +92,22 @@ export class DropManager {
     this.scene = scene;
     this.items = [];
     this.time = 0;
+    this.nextUid = 1;
+    this.remote = false; // 参加者側: ホストの状態を表示するだけ
+    this.onRequestSpawn = null; // 参加者側でアイテムを落としたときにホストへ頼む
   }
 
-  spawn(id, count, x, y, z, velocity = null, damage = 0) {
+  spawn(id, count, x, y, z, velocity = null, damage = 0, uid = null) {
     if (!ITEMS[id] || count <= 0) return null;
+    if (this.remote && uid === null) {
+      const v = velocity ?? new THREE.Vector3((Math.random() - 0.5) * 3, 3 + Math.random() * 2, (Math.random() - 0.5) * 3);
+      this.onRequestSpawn?.({ id, count, damage, x, y, z, vx: v.x, vy: v.y, vz: v.z });
+      return null;
+    }
     const mesh = buildItemMesh(id);
     mesh.scale.setScalar(iconKind(id) === 'iso' ? 0.25 : 0.35);
     const item = {
-      id, count, damage, mesh,
+      uid: uid ?? this.nextUid++, id, count, damage, mesh,
       position: new THREE.Vector3(x, y, z),
       velocity: velocity ?? new THREE.Vector3((Math.random() - 0.5) * 3, 3 + Math.random() * 2, (Math.random() - 0.5) * 3),
       width: 0.25, height: 0.25, onGround: false, age: 0,
@@ -115,6 +123,7 @@ export class DropManager {
 
   update(dt, player, inventory, onPickup) {
     this.time += dt;
+    if (this.remote) { this.updateMirror(dt); return; }
     for (let i = this.items.length - 1; i >= 0; i--) {
       const it = this.items[i];
       it.age += dt;
@@ -138,6 +147,44 @@ export class DropManager {
       }
       if (it.age > DESPAWN || it.position.y < -10) this.remove(i);
     }
+  }
+
+  // ホスト側: 別のプレイヤー (代理オブジェクト) が拾う。give(id, count, damage) を呼ぶ
+  pickupFor(other, give) {
+    if (other.dead || other.spectator) return;
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const it = this.items[i];
+      if (it.age <= PICKUP_DELAY) continue;
+      const dx = it.position.x - other.position.x, dy = it.position.y - other.position.y, dz = it.position.z - other.position.z;
+      if (dx * dx + dz * dz < 1.2 * 1.2 && dy > -0.8 && dy < 2) {
+        give(it.id, it.count, it.damage);
+        this.remove(i);
+      }
+    }
+  }
+
+  snapshot() {
+    return this.items.map((it) => [it.uid, it.id, it.count, +it.position.x.toFixed(2), +it.position.y.toFixed(2), +it.position.z.toFixed(2)]);
+  }
+
+  applySnapshot(list) {
+    const seen = new Set();
+    for (const [uid, id, count, x, y, z] of list) {
+      seen.add(uid);
+      let it = this.items.find((k) => k.uid === uid);
+      if (!it) { it = this.spawn(id, count, x, y, z, new THREE.Vector3(), 0, uid); if (!it) continue; }
+      it.count = count;
+      it.target = new THREE.Vector3(x, y, z);
+    }
+    for (let i = this.items.length - 1; i >= 0; i--) if (!seen.has(this.items[i].uid)) this.remove(i);
+  }
+
+  updateMirror(dt) {
+    this.items.forEach((it, i) => {
+      if (it.target) it.position.lerp(it.target, 1 - Math.exp(-dt * 10));
+      it.mesh.position.set(it.position.x, it.position.y + 0.15 + Math.sin(this.time * 2 + i) * 0.05, it.position.z);
+      it.mesh.rotation.y = this.time * 1.5 + i;
+    });
   }
 
   remove(i) {

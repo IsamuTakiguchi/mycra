@@ -122,6 +122,41 @@ kbd {
 .actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .note { margin: 12px 0 0; font-size: 11px; opacity: 0.6; }
 
+/* マルチプレイ */
+.mp-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.mp-row input {
+  font: inherit; font-size: 14px; padding: 7px 10px; border: 2px solid #555; border-radius: 6px;
+  background: #1e1e1e; color: #fff; min-width: 0; flex: 1 1 120px;
+}
+#mp-code { flex: 0 1 130px; text-transform: uppercase; letter-spacing: 2px; font-weight: 700; }
+#mp-link { font-size: 12px; }
+.mp-or { font-size: 12px; opacity: 0.7; }
+.panel button:disabled { opacity: 0.45; cursor: default; filter: none; }
+#mp-players { opacity: 0.9; }
+
+/* チャット */
+#chat {
+  position: fixed; left: max(8px, env(safe-area-inset-left)); bottom: 150px; z-index: 7;
+  width: min(480px, calc(100vw - 16px)); pointer-events: none;
+}
+#chat-log { display: flex; flex-direction: column; justify-content: flex-end; max-height: 40vh; overflow: hidden; }
+#chat-log .line {
+  padding: 2px 8px; font-size: 14px; line-height: 1.5; background: rgba(0, 0, 0, 0.45); color: #fff;
+  text-shadow: 1px 1px 0 #000; word-break: break-word; transition: opacity 0.8s;
+}
+#chat-log .line.sys { color: #ffe066; }
+#chat-log .line.old { opacity: 0; }
+#chat.open #chat-log .line { opacity: 1; }
+#chat-form { display: none; gap: 4px; margin-top: 4px; pointer-events: auto; }
+#chat.open #chat-form { display: flex; }
+#chat-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 8px 10px; border: 2px solid #888; border-radius: 6px;
+  background: rgba(0, 0, 0, 0.7); color: #fff;
+}
+#chat-form button {
+  font: inherit; font-size: 14px; padding: 0 12px; border: 2px solid #666; border-radius: 6px; background: #444; color: #fff;
+}
+
 /* ---------- インベントリ ---------- */
 #inv-screen { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 8; display: flex; align-items: center; justify-content: center; }
 #inv-panel {

@@ -37,11 +37,22 @@
       <div id="toast"></div>
     </div>
 
+    <!-- チャット (マルチプレイ) -->
+    <div id="chat">
+      <div id="chat-log"></div>
+      <form id="chat-form" autocomplete="off">
+        <input id="chat-input" maxlength="200" placeholder="メッセージを入力" enterkeyhint="send" />
+        <button type="submit">送信</button>
+        <button type="button" id="chat-close" aria-label="閉じる">✕</button>
+      </form>
+    </div>
+
     <!-- タッチ操作 UI (タブレット / スマートフォン) -->
     <div id="touch" class="hidden">
       <div id="touch-surface"></div>
       <div id="joystick"><div id="joystick-knob"></div></div>
       <div id="touch-top">
+        <button id="btn-chat" class="tbtn hidden" aria-label="チャット">💬</button>
         <button id="btn-inv" class="tbtn" aria-label="持ち物">⋯</button>
         <button id="btn-menu" class="tbtn" aria-label="メニュー">☰</button>
       </div>
@@ -95,13 +106,13 @@
           <div><kbd>ホイールクリック</kbd> ブロック選択　<kbd>Q</kbd> 捨てる　<kbd>E</kbd> 持ち物・クラフト</div>
           <div><kbd>1</kbd>〜<kbd>9</kbd> / <kbd>ホイール</kbd> ホットバー　<kbd>F5</kbd> 視点切替　<kbd>F3</kbd> デバッグ　<kbd>F1</kbd> HUD</div>
           <div>クリエイティブ: <kbd>Space</kbd> 二度押しで飛行 (<kbd>Space</kbd> 上昇 / <kbd>Shift</kbd> 下降)</div>
-          <div><kbd>Esc</kbd> メニューに戻る</div>
+          <div><kbd>T</kbd> チャット (マルチプレイ中)　<kbd>Esc</kbd> メニューに戻る</div>
         </div>
         <div class="controls" id="controls-touch">
           <div><b>画面左</b> をなぞって移動（外側までなぞるとダッシュ）　<b>画面右</b> をなぞって視点</div>
           <div>ブロックを <b>タップ</b> で置く / 使う / 攻撃　<b>長押し</b> で壊す（指の下のブロックが対象）</div>
           <div><b>▲</b> ジャンプ（クリエイティブでは二度押しで飛行）　<b>⇩</b> スニーク切替（飛行中は下降）</div>
-          <div><b>⋯</b> 持ち物・クラフト　下のバーをタップして選択</div>
+          <div><b>⋯</b> 持ち物・クラフト　<b>💬</b> チャット（マルチプレイ中）　下のバーをタップして選択</div>
         </div>
         <div class="settings">
           <div class="setting">
@@ -123,6 +134,25 @@
               <button data-diff="hard">ハード</button>
             </div>
             <p class="desc" id="diff-desc"></p>
+          </div>
+          <div class="setting" id="mp">
+            <div class="label">マルチプレイ（みんなで遊ぶ）</div>
+            <div class="mp-row">
+              <input id="mp-name" maxlength="16" placeholder="あなたの名前" autocomplete="off" />
+            </div>
+            <div class="mp-row" id="mp-idle">
+              <button id="mp-host" class="secondary">この世界を公開する</button>
+              <span class="mp-or">または</span>
+              <input id="mp-code" maxlength="6" placeholder="ルームコード" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+              <button id="mp-join" class="secondary">参加する</button>
+            </div>
+            <div class="mp-row hidden" id="mp-active">
+              <input id="mp-link" readonly aria-label="招待リンク" />
+              <button id="mp-copy" class="secondary">招待リンクをコピー</button>
+              <button id="mp-leave" class="secondary danger">退出する</button>
+            </div>
+            <p class="desc" id="mp-status"></p>
+            <p class="desc" id="mp-players"></p>
           </div>
         </div>
         <div class="actions">
