@@ -133,6 +133,13 @@ kbd {
 .mp-or { font-size: 12px; opacity: 0.7; }
 .panel button:disabled { opacity: 0.45; cursor: default; filter: none; }
 #mp-players { opacity: 0.9; }
+#mp-open { margin-top: 10px; }
+.mp-invite { display: flex; gap: 14px; align-items: center; margin-bottom: 8px; }
+#mp-qr { width: 164px; height: 164px; flex: none; background: #fff; border-radius: 6px; image-rendering: pixelated; }
+.mp-invite-text { font-size: 12.5px; line-height: 1.6; }
+.mp-invite-text p { margin: 4px 0 0; opacity: 0.85; }
+.mp-code-big { font-size: 30px; font-weight: 800; letter-spacing: 6px; color: var(--accent); }
+@media (max-width: 480px) { .mp-invite { flex-direction: column; } }
 
 /* チャット */
 #chat {

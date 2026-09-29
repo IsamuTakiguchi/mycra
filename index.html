@@ -99,6 +99,7 @@
         <h1>MyCra</h1>
         <p class="sub">ブラウザで動く Minecraft 風ボクセルワールド</p>
         <button id="start">クリックして開始</button>
+        <div><button id="mp-open" class="secondary">👥 みんなで遊ぶ（別の端末と同時プレイ）</button></div>
         <div class="controls" id="controls-desktop">
           <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動　<kbd>マウス</kbd> 視点　<kbd>Space</kbd> ジャンプ</div>
           <div><kbd>Shift</kbd> スニーク　<kbd>Ctrl</kbd> / <kbd>W</kbd> 二度押し ダッシュ</div>
@@ -146,10 +147,19 @@
               <input id="mp-code" maxlength="6" placeholder="ルームコード" autocomplete="off" autocapitalize="characters" spellcheck="false" />
               <button id="mp-join" class="secondary">参加する</button>
             </div>
-            <div class="mp-row hidden" id="mp-active">
-              <input id="mp-link" readonly aria-label="招待リンク" />
-              <button id="mp-copy" class="secondary">招待リンクをコピー</button>
-              <button id="mp-leave" class="secondary danger">退出する</button>
+            <div class="hidden" id="mp-active">
+              <div class="mp-invite" id="mp-invite">
+                <canvas id="mp-qr" width="164" height="164" aria-label="招待リンクの QR コード"></canvas>
+                <div class="mp-invite-text">
+                  <div class="mp-code-big" id="mp-code-big"></div>
+                  <p>ほかの端末でこの QR コードをカメラで読み取るか、ルームコードを入力すると参加できます。</p>
+                </div>
+              </div>
+              <div class="mp-row">
+                <input id="mp-link" readonly aria-label="招待リンク" />
+                <button id="mp-copy" class="secondary">招待リンクをコピー</button>
+                <button id="mp-leave" class="secondary danger">退出する</button>
+              </div>
             </div>
             <p class="desc" id="mp-status"></p>
             <p class="desc" id="mp-players"></p>
