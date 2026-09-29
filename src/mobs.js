@@ -76,12 +76,16 @@ export class MobManager {
     this.spawnTimer = 0;
     this.time = 0;
     this.difficulty = 'normal';
+    this.nextId = 1;
+    this.remote = false; // 参加者側: ホストの状態を表示するだけ
+    this.onArrow = null; // (from, velocity) 矢が放たれたとき (ホストが参加者へ知らせる)
     this.arrowGeo = new THREE.BoxGeometry(0.06, 0.06, 0.6);
     this.arrowMat = new THREE.MeshLambertMaterial({ color: 0x8a6a3a });
   }
 
-  add(type, x, y, z) {
+  add(type, x, y, z, id = null) {
     const mob = new Mob(type, x, y, z);
+    mob.id = id ?? this.nextId++;
     this.scene.add(mob.group);
     this.mobs.push(mob);
     return mob;
@@ -114,7 +118,10 @@ export class MobManager {
   }
 
   // 暗い場所に敵をわかせる (プレイヤーから 24〜48 ブロック)
-  trySpawn(player, daylight) {
+  trySpawn(players, daylight) {
+    const alive = players.filter((p) => !p.dead);
+    if (!alive.length) return;
+    const player = alive[Math.floor(Math.random() * alive.length)];
     const hostile = this.mobs.filter((m) => m.def.hostile).length;
     const passive = this.mobs.length - hostile;
     for (let attempt = 0; attempt < 6; attempt++) {
@@ -154,7 +161,10 @@ export class MobManager {
     return best ? { mob: best, distance: bestT } : null;
   }
 
-  update(dt, player, daylight, ctx) {
+  // players: このワールドにいる全プレイヤー (ホスト自身と参加者の代理オブジェクト)
+  update(dt, players, daylight, ctx) {
+    if (!Array.isArray(players)) players = [players];
+    if (this.remote) { this.updateMirror(dt, players[0], ctx); return; }
     this.time += dt;
     this.spawnTimer += dt;
     // ピースフルでは敵が消える
@@ -165,7 +175,7 @@ export class MobManager {
       for (const a of this.arrows) if (a.owner === 'mob') this.scene.remove(a.mesh);
       this.arrows = this.arrows.filter((a) => a.owner !== 'mob');
     }
-    if (this.spawnTimer > 1.5) { this.spawnTimer = 0; this.trySpawn(player, daylight); }
+    if (this.spawnTimer > 1.5) { this.spawnTimer = 0; this.trySpawn(players, daylight); }
 
     for (let i = this.mobs.length - 1; i >= 0; i--) {
       const m = this.mobs[i];
@@ -182,15 +192,71 @@ export class MobManager {
         }
         continue;
       }
-      this.updateMob(m, dt, player, daylight, ctx);
+      // 一番近い (狙える) プレイヤーを相手にする
+      let target = players[0], best = Infinity;
+      for (const p of players) {
+        if (p.dead || p.ignoredByMobs) continue;
+        const d = p.position.distanceToSquared(m.position);
+        if (d < best) { best = d; target = p; }
+      }
+      this.updateMob(m, dt, target, daylight, ctx);
 
-      // 遠すぎる敵は消える
-      const dist = m.position.distanceTo(player.position);
-      if (m.def.hostile && dist > 72) { this.scene.remove(m.group); this.mobs.splice(i, 1); continue; }
+      // 全員から遠すぎる敵は消える
+      let nearest = Infinity;
+      for (const p of players) nearest = Math.min(nearest, m.position.distanceTo(p.position));
+      if (m.def.hostile && nearest > 72) { this.scene.remove(m.group); this.mobs.splice(i, 1); continue; }
       if (m.position.y < -10) { this.scene.remove(m.group); this.mobs.splice(i, 1); }
     }
 
-    this.updateArrows(dt, player, ctx);
+    this.updateArrows(dt, players, ctx);
+  }
+
+  // ---- 参加者側: ホストの状態を補間して表示する ----
+  snapshot() {
+    return this.mobs.map((m) => [m.id, m.type, +m.position.x.toFixed(2), +m.position.y.toFixed(2), +m.position.z.toFixed(2), +m.yaw.toFixed(2), (m.hurtTimer > 0 ? 1 : 0) | (m.dead ? 2 : 0)]);
+  }
+
+  applySnapshot(list) {
+    const seen = new Set();
+    for (const [id, type, x, y, z, yaw, flags] of list) {
+      seen.add(id);
+      let m = this.mobs.find((k) => k.id === id);
+      if (!m) {
+        if (!MOB_TYPES[type] || (flags & 2)) continue;
+        m = this.add(type, x, y, z, id);
+      }
+      m.netTarget = new THREE.Vector3(x, y, z);
+      m.yaw = yaw;
+      if ((flags & 1) && m.hurtTimer <= 0) { m.hurtTimer = 0.3; setFlash(m.group, true); }
+      if ((flags & 2) && !m.dead) { m.dead = true; m.deathTimer = 0.6; }
+    }
+    for (let i = this.mobs.length - 1; i >= 0; i--) {
+      const m = this.mobs[i];
+      if (!seen.has(m.id) && !m.dead) { this.scene.remove(m.group); this.mobs.splice(i, 1); }
+    }
+  }
+
+  updateMirror(dt, player, ctx) {
+    for (let i = this.mobs.length - 1; i >= 0; i--) {
+      const m = this.mobs[i];
+      if (m.hurtTimer > 0) { m.hurtTimer -= dt; if (m.hurtTimer <= 0) setFlash(m.group, false); }
+      if (m.dead) {
+        m.deathTimer -= dt;
+        m.group.rotation.z = Math.min(Math.PI / 2, m.group.rotation.z + dt * 6);
+        if (m.deathTimer <= 0) { this.scene.remove(m.group); this.mobs.splice(i, 1); }
+        continue;
+      }
+      if (m.netTarget) {
+        const before = m.position.clone();
+        m.position.lerp(m.netTarget, 1 - Math.exp(-dt * 10));
+        const moved = Math.hypot(m.position.x - before.x, m.position.z - before.z) / Math.max(dt, 1e-3);
+        m.animTime += dt * Math.min(1, moved / 1.5 + 0.2);
+        m.model.animate(m.animTime, moved, false);
+      }
+      m.group.position.copy(m.position);
+      m.group.rotation.y += ((((m.yaw - m.group.rotation.y) % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI) * Math.min(1, dt * 8);
+    }
+    this.updateArrows(dt, [player], ctx);
   }
 
   updateMob(m, dt, player, daylight, ctx) {
@@ -234,7 +300,7 @@ export class MobManager {
         if (dist < 1.6 && m.attackTimer <= 0 && Math.abs(toPlayer.y) < 2) {
           m.attackTimer = 1.0;
           const kb = { x: dirX * 5, z: dirZ * 5 };
-          if (player.damage(def.attack, kb, true)) ctx.onPlayerHurt?.();
+          if (player.damage(def.attack, kb, true) && !player.remote) ctx.onPlayerHurt?.();
         }
       }
     } else {
@@ -330,10 +396,14 @@ export class MobManager {
     const mesh = new THREE.Mesh(this.arrowGeo, this.arrowMat);
     mesh.position.copy(from);
     this.scene.add(mesh);
-    this.arrows.push({ position: from.clone(), velocity: velocity.clone(), mesh, age: 0, stuck: false, owner, damage, pickup });
+    const arrow = { position: from.clone(), velocity: velocity.clone(), mesh, age: 0, stuck: false, owner, damage, pickup };
+    this.arrows.push(arrow);
+    if (owner !== 'visual') this.onArrow?.(from, velocity, arrow);
+    return arrow;
   }
 
-  updateArrows(dt, player, ctx) {
+  updateArrows(dt, players, ctx) {
+    if (!Array.isArray(players)) players = [players];
     for (let i = this.arrows.length - 1; i >= 0; i--) {
       const a = this.arrows[i];
       a.age += dt;
@@ -349,15 +419,19 @@ export class MobManager {
             a.stuck = true;
             // プレイヤーが射った矢は拾えるようにアイテムとして落とす
             if (a.owner === 'player' && a.pickup) ctx?.drops?.spawn('arrow', 1, a.position.x, a.position.y, a.position.z, new THREE.Vector3());
-            if (a.owner === 'player') remove = true;
+            if (a.owner === 'player' || a.owner === 'visual') remove = true;
             break;
           }
           a.position.copy(next);
           const hitbox = { position: a.position.clone().sub(new THREE.Vector3(0.1, 0.1, 0.1)), width: 0.2, height: 0.2 };
-          if (a.owner === 'mob') {
-            if (!player.dead && !player.ignoredByMobs && intersectsEntity(hitbox, player)) {
+          if (a.owner === 'visual') {
+            // 見た目だけの矢 (参加者側)。モブやプレイヤーに触れたら消す
+            if (this.mobs.some((m) => !m.dead && intersectsEntity(hitbox, m))) remove = true;
+          } else if (a.owner === 'mob') {
+            const hitPlayer = players.find((pl) => !pl.dead && !pl.ignoredByMobs && intersectsEntity(hitbox, pl));
+            if (hitPlayer) {
               const l = Math.hypot(a.velocity.x, a.velocity.z) || 1;
-              if (player.damage(a.damage, { x: (a.velocity.x / l) * 3, z: (a.velocity.z / l) * 3 }, true)) this.onPlayerHurt?.();
+              if (hitPlayer.damage(a.damage, { x: (a.velocity.x / l) * 3, z: (a.velocity.z / l) * 3 }, true) && hitPlayer === players[0]) this.onPlayerHurt?.();
               remove = true;
             }
           } else {

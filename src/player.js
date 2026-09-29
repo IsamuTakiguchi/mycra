@@ -156,12 +156,13 @@ export class Player {
   }
 
   // ダメージ (true: 適用された)。fromMob のときは難易度の倍率と防具の軽減がかかる
+  // ('pvp' は他のプレイヤーからの攻撃: 防具の軽減だけかかる)
   damage(amount, knockback = null, fromMob = false) {
     if (this.dead || amount <= 0) return false;
     if (!this.hasStats) return false;
     if (this.hurtTimer > 0) return false;
     if (fromMob) {
-      amount = amount * DIFFICULTY_RULES[this.difficulty].mobDamage;
+      if (fromMob !== 'pvp') amount = amount * DIFFICULTY_RULES[this.difficulty].mobDamage;
       if (amount <= 0) return false;
       // Minecraft の防具の計算式
       const { points, toughness } = this.armor;

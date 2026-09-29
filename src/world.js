@@ -65,6 +65,7 @@ export class World {
     this.edits = new Map(); // "x,y,z" -> [id, meta] (セーブ用の差分)
     this.containers = new Map(); // "x,y,z" -> スロット配列 (チェスト・樽)
     this.saplings = new Set(); // "x,y,z"
+    this.onChange = null; // (x, y, z, id, meta) ブロックが変わったとき (マルチプレイの同期用)
     this.chunks = new Map();
     this.group = new THREE.Group();
     this.lighting = new Lighting(this);
@@ -122,7 +123,24 @@ export class World {
     if (BLOCKS[id]?.sapling) this.saplings.add(key);
     this.markDirtyAround(x, z);
     if (updateLight && (OPAQUE[old] !== OPAQUE[id] || LIGHT[old] !== LIGHT[id])) this.lighting.updateAround(x, z);
+    this.onChange?.(x, y, z, id, meta);
     return true;
+  }
+
+  // 他のプレイヤーからのブロック変更をまとめて反映する (通知はしない)
+  applyRemote(list) {
+    const hook = this.onChange;
+    this.onChange = null;
+    const regions = new Map();
+    for (const [x, y, z, id, meta] of list) {
+      if (!BLOCKS[id]) continue;
+      const old = this.get(x, y, z);
+      if (this.set(x, y, z, id, meta ?? 0, false) && (OPAQUE[old] !== OPAQUE[id] || LIGHT[old] !== LIGHT[id])) {
+        regions.set(`${x >> 3},${z >> 3}`, [x, z]);
+      }
+    }
+    for (const [x, z] of regions.values()) this.lighting.updateAround(x, z);
+    this.onChange = hook;
   }
 
   setMeta(x, y, z, meta) {
