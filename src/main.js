@@ -1589,9 +1589,23 @@ $('mp-open').addEventListener('click', () => {
 });
 
 $('mp-host').addEventListener('click', () => { save(); net.host(myName()); });
-$('mp-join').addEventListener('click', () => { save(); net.join(codeInput.value, myName()); });
-codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('mp-join').click(); } });
-codeInput.addEventListener('input', () => { codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
+// ルームコード: 全角は半角に、小文字は大文字にそろえ、英数字 6 文字だけ残す
+const normalizeCode = (v) => v
+  .replace(/[Ａ-Ｚａ-ｚ０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+  .toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+// 日本語入力 (ローマ字入力) の変換中に書き換えると、確定した文字が二重に入る (Z → ZZ) ので、確定してから整える
+let codeComposing = false;
+const tidyCode = () => {
+  const v = normalizeCode(codeInput.value);
+  if (v !== codeInput.value) codeInput.value = v;
+};
+$('mp-join').addEventListener('click', () => { save(); tidyCode(); net.join(codeInput.value, myName()); });
+codeInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing && !codeComposing) { e.preventDefault(); $('mp-join').click(); }
+});
+codeInput.addEventListener('compositionstart', () => { codeComposing = true; });
+codeInput.addEventListener('compositionend', () => { codeComposing = false; tidyCode(); });
+codeInput.addEventListener('input', (e) => { if (!e.isComposing && !codeComposing) tidyCode(); });
 $('mp-leave').addEventListener('click', () => net.leave());
 $('mp-copy').addEventListener('click', async () => {
   const url = net.inviteUrl();
