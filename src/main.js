@@ -16,6 +16,7 @@ import { blockIntersectsEntity, cellsTouching } from './physics.js';
 import { META } from './shapes.js';
 import { mulberry32 } from './noise.js';
 import { DAY_LENGTH } from './constants.js';
+import { waterHeight } from './fluids.js';
 import { Multiplayer, cleanName } from './multiplayer.js';
 import qrcode from 'qrcode-generator';
 
@@ -193,6 +194,11 @@ function createWorld(seed, saveData = null, gameMode = 'survival') {
   world.generate();
   if (saveData?.edits) world.applyEdits(saveData.edits);
   world.onChange = (x, y, z, id, meta) => net.blockChanged(x, y, z, id, meta);
+  // 水に押し流された草花・松明はアイテムになる。流れ込んだ先のコンクリートパウダーは固まる
+  world.fluids.onWash = (x, y, z, id, meta) => spawnBlockDrops(BLOCKS[id], meta, x, y, z, null);
+  world.fluids.onFlow = (x, y, z) => {
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) hardenPowder(x + dx, y + dy, z + dz);
+  };
   for (const [k, slots] of saveData?.containers ?? []) world.containers.set(k, loadSlots(slots, CONTAINER_SIZE));
   for (const t of primedTnt) scene.remove(t.mesh);
   primedTnt.length = 0;
@@ -449,13 +455,19 @@ const touch = new TouchControls($('touch'), null, {
     const now = performance.now();
     if (now - lastSpaceTap < 300) { toggleFly(); lastSpaceTap = 0; } else lastSpaceTap = now;
   },
-  onInventory: () => { if (screen.open) closeInventory(); else if (touchPlaying && !player.dead) openInventory(); },
   onMenu: () => showMenu(),
 });
 
-// ホットバーのタップ
+// ホットバーのタップ (右端の「⋯」は持ち物を開く。Minecraft 統合版と同じ)
 $('hotbar').addEventListener('pointerdown', (e) => {
-  const slots = [...$('hotbar').children];
+  if (e.target.closest('#hotbar-more')) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (screen.open) closeInventory();
+    else if ((locked || touchPlaying) && !player.dead) openInventory();
+    return;
+  }
+  const slots = [...$('hotbar').querySelectorAll('.slot')];
   const i = slots.findIndex((s) => s === e.target || s.contains(e.target));
   if (i >= 0 && (locked || touchPlaying)) { e.preventDefault(); selectSlot(i); }
 });
@@ -1054,7 +1066,8 @@ function useBucket(def) {
   const hit = raycastVoxel(world, eye, dir, reach(), { fluids: true });
   if (!hit) return;
   if (def.bucket === 'empty') {
-    if (hit.id !== BLOCK.WATER) return;
+    // くめるのは水源だけ (流れている水はくめない)
+    if (hit.id !== BLOCK.WATER || world.getMeta(hit.x, hit.y, hit.z) !== 0) return;
     world.set(hit.x, hit.y, hit.z, BLOCK.AIR);
     if (player.consumesItems) {
       const s = inventory.selectedItem;
@@ -1265,6 +1278,7 @@ function updateCamera() {
   playerModel.group.position.copy(player.position);
   playerModel.group.rotation.y = player.yaw + Math.PI;
   playerModel.parts.head.rotation.x = -player.pitch;
+  playerModel.parts.body.rotation.x = player.sneaking ? 0.35 : 0;
   playerModel.animate(modelAnim, Math.hypot(player.velocity.x, player.velocity.z) / 2);
 }
 
@@ -1274,6 +1288,9 @@ let last = performance.now();
 // 世界の時間を進める (TNT・昼夜・モブ・アイテム・通信)
 function updateShared(dt, active) {
   updateTnt(dt);
+  // 水の流れはホスト (または一人用) だけが計算し、参加者には変化したブロックとして届く
+  world.fluids.enabled = !net.isClient;
+  world.fluids.update(dt);
   updateSky(dt);
   mobs.update(dt, net.targets(), daylight, {
     drops,
@@ -1314,6 +1331,7 @@ function loop(now) {
   if (player.dead && deathEl.classList.contains('hidden')) onDeath();
 
   updateCamera();
+  touch.sync();
   hand.update(dt, active && player.moving, mining.active && !!mining.key);
 
   // 選択枠とヒビ
@@ -1333,7 +1351,8 @@ function loop(now) {
   } else crackMesh.visible = false;
 
   // 水中の見た目
-  const inWaterHead = world.get(Math.floor(camera.position.x), Math.floor(camera.position.y), Math.floor(camera.position.z)) === BLOCK.WATER;
+  const cy = Math.floor(camera.position.y);
+  const inWaterHead = camera.position.y - cy < waterHeight(world, Math.floor(camera.position.x), cy, Math.floor(camera.position.z));
   if (inWaterHead) {
     scene.fog.near = 2; scene.fog.far = 24;
     scene.fog.color.set(0x1d4f9e);

@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { BLOCK, BLOCKS, OPAQUE, LIGHT, blockId, faceTile, tileUV, createAtlas, FLOWER_NAMES } from './blocks.js';
+import { BLOCK, BLOCKS, OPAQUE, SOLID, LIGHT, blockId, faceTile, tileUV, createAtlas, FLOWER_NAMES } from './blocks.js';
 import { shapeBoxes } from './shapes.js';
 import { Perlin2D, mulberry32 } from './noise.js';
 import { Lighting } from './lighting.js';
+import { Fluids, waterHeight } from './fluids.js';
 import { CHUNK_SIZE, WORLD_HEIGHT, WORLD_CHUNKS, SEA_LEVEL } from './constants.js';
 
 export { CHUNK_SIZE, WORLD_HEIGHT, WORLD_CHUNKS, SEA_LEVEL };
@@ -69,6 +70,7 @@ export class World {
     this.chunks = new Map();
     this.group = new THREE.Group();
     this.lighting = new Lighting(this);
+    this.fluids = new Fluids(this);
 
     const { texture } = createAtlas();
     this.materials = {
@@ -123,6 +125,7 @@ export class World {
     if (BLOCKS[id]?.sapling) this.saplings.add(key);
     this.markDirtyAround(x, z);
     if (updateLight && (OPAQUE[old] !== OPAQUE[id] || LIGHT[old] !== LIGHT[id])) this.lighting.updateAround(x, z);
+    this.fluids.notify(x, y, z);
     this.onChange?.(x, y, z, id, meta);
     return true;
   }
@@ -512,6 +515,7 @@ export class World {
           const buf = buffers[def.layer];
           if (!buf) continue;
           const meta = this.meta[i];
+          if (id === BLOCK.WATER) { this.addWater(buf, x, y, z); continue; }
           switch (def.shape) {
             case 'cube': this.addCube(buf, x, y, z, id, meta, def); break;
             case 'cross': this.addCross(buf, x, y, z, id); break;
@@ -559,6 +563,57 @@ export class World {
         buf.nor.push(face.dir[0], face.dir[1], face.dir[2]);
         buf.uv.push(c[3] ? u1 : u0, c[4] ? v1 : v0);
         const { ao, sky, blk } = this.vertexLight(x, y, z, face.dir, c, isWater);
+        const light = shade * ao;
+        buf.col.push(light, light, light);
+        buf.sky.push(sky);
+        buf.blk.push(blk);
+      }
+      buf.idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    }
+  }
+
+  // 水: 水位に合わせて上面の高さを変える。角の高さは隣の水と平均して、流れがなめらかな斜面になる
+  waterCorner(x, y, z, cx, cz) {
+    let total = 0, weight = 0;
+    for (let ox = cx - 1; ox <= cx; ox++) {
+      for (let oz = cz - 1; oz <= cz; oz++) {
+        const h = waterHeight(this, x + ox, y, z + oz);
+        if (h >= 1) return 1;
+        if (h >= 0) {
+          const wt = h >= 0.8 ? 10 : 1;
+          total += h * wt; weight += wt;
+        } else if (!SOLID[this.get(x + ox, y, z + oz)]) weight += 1;
+      }
+    }
+    return weight ? total / weight : 8 / 9;
+  }
+
+  addWater(buf, x, y, z) {
+    const id = BLOCK.WATER;
+    const covered = this.get(x, y + 1, z) === id;
+    const hgt = covered ? [[1, 1], [1, 1]] : [
+      [this.waterCorner(x, y, z, 0, 0), this.waterCorner(x, y, z, 0, 1)],
+      [this.waterCorner(x, y, z, 1, 0), this.waterCorner(x, y, z, 1, 1)],
+    ];
+    for (let f = 0; f < 6; f++) {
+      const face = FACES[f];
+      const nx = x + face.dir[0], ny = y + face.dir[1], nz = z + face.dir[2];
+      if (ny < 0) continue;
+      const neighbor = this.get(nx, ny, nz);
+      if (neighbor === id) continue;
+      if (f === 3) {
+        if (covered) continue;
+      } else if (OPAQUE[neighbor]) continue;
+      const [u0, v0, u1, v1] = tileUV(faceTile(id, f, 0));
+      const shade = FACE_SHADE[f];
+      const base = buf.pos.length / 3;
+      for (const c of face.corners) {
+        const top = c[1] ? hgt[c[0]][c[2]] : 0;
+        buf.pos.push(x + c[0], y + top, z + c[2]);
+        buf.nor.push(face.dir[0], face.dir[1], face.dir[2]);
+        const v = f === 2 || f === 3 ? (c[4] ? v1 : v0) : v0 + (v1 - v0) * top;
+        buf.uv.push(c[3] ? u1 : u0, v);
+        const { ao, sky, blk } = this.vertexLight(x, y, z, face.dir, c, true);
         const light = shade * ao;
         buf.col.push(light, light, light);
         buf.sky.push(sky);

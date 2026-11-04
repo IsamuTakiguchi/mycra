@@ -53,12 +53,14 @@
       <div id="joystick"><div id="joystick-knob"></div></div>
       <div id="touch-top">
         <button id="btn-chat" class="tbtn hidden" aria-label="チャット">💬</button>
-        <button id="btn-inv" class="tbtn" aria-label="持ち物">⋯</button>
         <button id="btn-menu" class="tbtn" aria-label="メニュー">☰</button>
       </div>
       <div id="touch-right">
         <div class="trow">
-          <button id="btn-sneak" class="tbtn round" aria-label="スニーク">⇩</button>
+          <button id="btn-sprint" class="tbtn round labeled" aria-label="ダッシュ"><span class="ic">»</span><span class="cap">ダッシュ</span></button>
+        </div>
+        <div class="trow">
+          <button id="btn-sneak" class="tbtn round labeled" aria-label="しゃがむ"><span class="ic">⇩</span><span class="cap">しゃがむ</span></button>
           <button id="btn-jump" class="tbtn round big" aria-label="ジャンプ">▲</button>
         </div>
       </div>
@@ -102,7 +104,7 @@
         <div><button id="mp-open" class="secondary">👥 みんなで遊ぶ（別の端末と同時プレイ）</button></div>
         <div class="controls" id="controls-desktop">
           <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動　<kbd>マウス</kbd> 視点　<kbd>Space</kbd> ジャンプ</div>
-          <div><kbd>Shift</kbd> スニーク　<kbd>Ctrl</kbd> / <kbd>W</kbd> 二度押し ダッシュ</div>
+          <div><kbd>Shift</kbd> しゃがむ (スニーク)　<kbd>R</kbd> / <kbd>Ctrl</kbd> / <kbd>W</kbd> 二度押し ダッシュ</div>
           <div><kbd>左クリック</kbd> 長押しで壊す / 攻撃　<kbd>右クリック</kbd> 置く / 使う (ドアの開閉・ベッド・チェスト) / 食べる / 弓を引く</div>
           <div><kbd>ホイールクリック</kbd> ブロック選択　<kbd>Q</kbd> 捨てる　<kbd>E</kbd> 持ち物・クラフト</div>
           <div><kbd>1</kbd>〜<kbd>9</kbd> / <kbd>ホイール</kbd> ホットバー　<kbd>F5</kbd> 視点切替　<kbd>F3</kbd> デバッグ　<kbd>F1</kbd> HUD</div>
@@ -110,10 +112,10 @@
           <div><kbd>T</kbd> チャット (マルチプレイ中)　<kbd>Esc</kbd> メニューに戻る</div>
         </div>
         <div class="controls" id="controls-touch">
-          <div><b>画面左</b> をなぞって移動（外側までなぞるとダッシュ）　<b>画面右</b> をなぞって視点</div>
+          <div><b>画面左</b> をなぞって移動（前に 2 回はじく・外側までなぞるとダッシュ）　<b>画面右</b> をなぞって視点</div>
           <div>ブロックを <b>タップ</b> で置く / 使う / 攻撃　<b>長押し</b> で壊す（指の下のブロックが対象）</div>
-          <div><b>▲</b> ジャンプ（クリエイティブでは二度押しで飛行）　<b>⇩</b> スニーク切替（飛行中は下降）</div>
-          <div><b>⋯</b> 持ち物・クラフト　<b>💬</b> チャット（マルチプレイ中）　下のバーをタップして選択</div>
+          <div><b>▲</b> ジャンプ（クリエイティブでは二度押しで飛行）　<b>⇩</b> しゃがむ切替（飛行中は下降）　<b>»</b> ダッシュ切替</div>
+          <div>下のバーをタップして選択、右端の <b>⋯</b> で持ち物・クラフト　<b>💬</b> チャット（マルチプレイ中）</div>
         </div>
         <div class="settings">
           <div class="setting">
