@@ -73,6 +73,13 @@ html, body {
   display: none; position: absolute; left: 4px; right: 4px; bottom: 3px; height: 3px; background: #000;
 }
 .dur::after { content: ""; display: block; height: 100%; width: var(--w, 100%); background: var(--c, #3c3); }
+#hotbar-more {
+  display: none; width: 48px; height: 48px; margin-left: 2px; padding: 0; border: 2px solid rgba(255, 255, 255, 0.35); border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1); color: #fff; font: inherit; font-size: 26px; font-weight: 700; line-height: 1;
+  touch-action: none; -webkit-tap-highlight-color: transparent; cursor: pointer;
+}
+#hotbar-more:active { background: rgba(255, 255, 255, 0.35); }
+body.touch #hotbar-more { display: flex; align-items: center; justify-content: center; }
 .count, .islot .count {
   position: absolute; right: 3px; bottom: 1px; font-size: 13px; font-weight: 700; text-shadow: 1px 1px 0 #000;
 }
@@ -231,6 +238,13 @@ kbd {
 .tbtn.round { border-radius: 50%; width: 56px; min-width: 56px; height: 56px; padding: 0; }
 .tbtn.big { width: 76px; min-width: 76px; height: 76px; font-size: 26px; }
 .tbtn.wide { min-width: 72px; }
+.tbtn.labeled { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; }
+.tbtn.labeled .ic { font-size: 20px; line-height: 1; }
+.tbtn.labeled .cap { font-size: 9px; font-weight: 700; line-height: 1; letter-spacing: -0.5px; }
+/* on: 切り替え ON、active: 実際にダッシュ中 / しゃがみ中 */
+.tbtn.on { background: rgba(255, 255, 255, 0.3); border-color: #fff; }
+#btn-sprint.active { background: rgba(111, 201, 58, 0.6); border-color: #b8f08a; }
+#btn-sneak.active { background: rgba(90, 160, 230, 0.6); border-color: #b6dcff; }
 #touch-top { position: absolute; right: max(12px, env(safe-area-inset-right)); top: max(12px, env(safe-area-inset-top)); display: flex; gap: 8px; }
 #touch-top .tbtn { width: 48px; min-width: 48px; font-size: 22px; }
 #touch-right {
@@ -246,7 +260,7 @@ body.touch #info { font-size: 11px; }
 body.touch #crosshair { display: none; }
 
 @media (max-width: 900px) {
-  .slot { width: 42px; height: 42px; }
+  .slot, #hotbar-more { width: 42px; height: 42px; }
   .slot canvas { width: 28px; height: 28px; }
   .stat-icon { width: 15px; height: 15px; }
   .igrid { grid-template-columns: repeat(9, 36px); }
@@ -256,7 +270,8 @@ body.touch #crosshair { display: none; }
   .islot canvas { width: 26px; height: 26px; }
 }
 @media (max-width: 600px) {
-  .slot { width: 32px; height: 32px; }
+  .slot, #hotbar-more { width: 32px; height: 32px; }
+  #hotbar-more { font-size: 20px; }
   .slot canvas { width: 22px; height: 22px; }
   #inv-panel { flex-direction: column; gap: 8px; padding: 10px; }
   #inv-left-col { width: auto; }

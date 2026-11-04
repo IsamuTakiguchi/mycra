@@ -11,6 +11,9 @@ const GRAVITY = 28;
 const MAX_FALL = 40;
 const EYE_STAND = 1.62;
 const EYE_SNEAK = 1.27;
+const HEIGHT_STAND = 1.8;
+const HEIGHT_SNEAK = 1.5;
+const WATER_PUSH = 1.6; // 流れる水に押し流される速さ
 
 export const MAX_HEALTH = 20;
 export const MAX_HUNGER = 20;
@@ -196,10 +199,13 @@ export class Player {
     const strafe = clamp1((k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0) + t.strafe);
     const jump = k.has('Space') || t.jump;
     const sneakHeld = k.has('ShiftLeft') || k.has('ShiftRight') || t.sneak;
-    const ctrl = k.has('ControlLeft') || k.has('ControlRight') || t.sprint;
+    // R でもダッシュできる (ブラウザでは Ctrl + W がタブを閉じる操作になるため)
+    const ctrl = k.has('ControlLeft') || k.has('ControlRight') || k.has('KeyR') || t.sprint;
 
     // Minecraft: Shift はスニーク (飛行中は下降)。Ctrl または W 二度押しでダッシュ
-    this.sneaking = sneakHeld && !this.flying;
+    // スニーク中は背が低くなる (1.5 ブロックのすき間を通れる)。頭上がふさがっていると立ち上がれない
+    this.sneaking = (sneakHeld && !this.flying) || (this.sneaking && !this.flying && !this.canStandUp());
+    this.height = this.sneaking ? HEIGHT_SNEAK : HEIGHT_STAND;
     if (ctrl && forward > 0.5 && !this.sneaking && (!this.hasStats || this.hunger > 6)) this.sprinting = true;
     if (forward <= 0.5 || this.sneaking || this.hitWall || (this.hasStats && this.hunger <= 6)) this.sprinting = false;
 
@@ -243,11 +249,14 @@ export class Player {
       this.velocity.lerp(target, blend);
       this.fallDistance = 0;
     } else if (this.inWater) {
-      const speed = 2.6;
+      const speed = this.sprinting ? 3.4 : 2.6;
       const blend = 1 - Math.exp(-dt * 6);
-      this.velocity.x += (mx * speed - this.velocity.x) * blend;
-      this.velocity.z += (mz * speed - this.velocity.z) * blend;
+      // 流れる水に押し流される (滝では下向きに引っぱられる)
+      const flow = this.world.fluids.flowAt(Math.floor(p.x), Math.floor(p.y + 0.2), Math.floor(p.z));
+      this.velocity.x += (mx * speed + flow.x * WATER_PUSH - this.velocity.x) * blend;
+      this.velocity.z += (mz * speed + flow.z * WATER_PUSH - this.velocity.z) * blend;
       this.velocity.y -= 9 * dt;
+      if (flow.y < 0 && !jump) this.velocity.y -= 12 * dt;
       if (jump) this.velocity.y += 24 * dt;
       if (jump && !headInWater && this.velocity.y > 0) this.velocity.y = Math.min(this.velocity.y + 20 * dt, 6);
       this.velocity.y = Math.max(-3, Math.min(this.velocity.y, 5));
@@ -339,6 +348,23 @@ export class Player {
     const targetEye = this.sneaking ? EYE_SNEAK : EYE_STAND;
     this.eyeHeight += (targetEye - this.eyeHeight) * (1 - Math.exp(-dt * 20));
     this.syncCamera();
+  }
+
+  // 立ち上がれるか (頭上 1.8 ブロックの範囲にブロックがないか)
+  canStandUp() {
+    const p = this.position;
+    const half = this.width / 2;
+    const y0 = Math.floor(p.y + HEIGHT_SNEAK);
+    const y1 = Math.floor(p.y + HEIGHT_STAND - 0.001);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = Math.floor(p.x - half); x <= Math.floor(p.x + half - 0.001); x++) {
+        for (let z = Math.floor(p.z - half); z <= Math.floor(p.z + half - 0.001); z++) {
+          const id = this.world.get(x, y, z);
+          if (id !== BLOCK.AIR && BLOCKS[id]?.solid && y + 1 > p.y + HEIGHT_SNEAK) return false;
+        }
+      }
+    }
+    return true;
   }
 
   syncCamera() {

@@ -65,6 +65,13 @@ export class HUD {
       els.hotbar.appendChild(slot);
       this.slotEls.push({ slot, canvas: c, count, bar, key: '' });
     }
+    // 右端の「⋯」: 持ち物の一覧を開く (タッチ操作のとき表示。Minecraft 統合版と同じ)
+    const more = document.createElement('button');
+    more.id = 'hotbar-more';
+    more.type = 'button';
+    more.setAttribute('aria-label', '持ち物の一覧を開く');
+    more.textContent = '⋯';
+    els.hotbar.appendChild(more);
     this.nameTimer = 0;
   }
 
